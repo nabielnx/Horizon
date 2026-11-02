@@ -25,6 +25,7 @@ mod shelf;
 mod shelf_ui;
 mod shell_policy;
 mod startup;
+mod taskbar;
 mod tasks_ui;
 mod ui;
 use chrono::{Local, TimeZone};
@@ -176,6 +177,7 @@ struct Window {
     battery_phase: Instant,
     power_notice: Option<power::Notice>,
     power_notification: Option<power::Notification>,
+    taskbar_watch: Option<taskbar::ForegroundWatch>,
     power_changes: u64,
     last_power_change: Option<power::ConnectionChange>,
     compact_activity: figma_ui::CompactActivity,
@@ -573,6 +575,26 @@ pub(crate) unsafe fn update_policy(hwnd: HWND, w: &mut Window) {
             apply_frame(hwnd, w);
         }
         let _ = InvalidateRect(Some(hwnd), None, false);
+    }
+    if w.shared.borrow().data.settings.taskbar_layout && w.mode != shell_policy::Mode::Hidden {
+        let bar = taskbar::primary();
+        let mut bounds = RECT::default();
+        if GetWindowRect(hwnd, &mut bounds).is_ok() && bounds.top != 0 {
+            apply_frame(hwnd, w);
+        }
+        if let Some((bar, _)) = bar
+            && taskbar::above(bar, hwnd)
+        {
+            let _ = SetWindowPos(
+                hwnd,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+        }
     }
 }
 unsafe fn persist(w: &Window) -> bool {
@@ -1655,6 +1677,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             let _ = probes::running_media_diagnostics(w);
             LRESULT(0)
         }
+        m if m == WM_APP + 13 => {
+            if !w.settings && !w.shared.borrow().data.settings.taskbar_layout {
+                action(hwnd, w, Action::Setting(17, 1));
+            }
+            LRESULT(0)
+        }
+        m if m == WM_APP + 14 => {
+            if !w.settings {
+                update_policy(hwnd, w);
+            }
+            LRESULT(0)
+        }
         m if m == WM_APP + 10 => {
             if w.expanded {
                 w.expanded = false;
@@ -1930,6 +1964,7 @@ unsafe fn create(shared: Rc<RefCell<Shared>>, settings: bool, offscreen: bool) -
         battery_phase: Instant::now(),
         power_notice: None,
         power_notification: None,
+        taskbar_watch: None,
         power_changes: 0,
         last_power_change: None,
         compact_activity: figma_ui::CompactActivity::default(),
@@ -2040,6 +2075,7 @@ unsafe fn create(shared: Rc<RefCell<Shared>>, settings: bool, offscreen: bool) -
     }
     if !settings && !offscreen {
         w.power_notification = power::Notification::register(hwnd);
+        w.taskbar_watch = taskbar::ForegroundWatch::register(hwnd);
         unsafe {
             DragAcceptFiles(hwnd, BOOL(1));
         }
@@ -2208,6 +2244,17 @@ impl Drop for Instance {
     }
 }
 fn run() -> Result<()> {
+    if std::env::args().any(|arg| arg == "--taskbar-layout-on") {
+        unsafe {
+            PostMessageW(
+                Some(FindWindowW(w!("Horizon.Native"), w!("Horizon"))?),
+                WM_APP + 13,
+                WPARAM(0),
+                LPARAM(0),
+            )?;
+        }
+        return Ok(());
+    }
     if std::env::args().any(|arg| arg == "--inspect-running-media") {
         unsafe {
             let hwnd = FindWindowW(w!("Horizon.Native"), w!("Horizon"))?;
@@ -2420,14 +2467,14 @@ fn run() -> Result<()> {
                 ));
             }
             settings.pointer = (-1, -1);
-            if wired != (0..17).collect() {
+            if wired != (0..18).collect() {
                 return Err(Error::new(E_FAIL, "Some settings controls are missing"));
             }
             // Exercise a width change below the configured maximum, including
             // when the current default already starts at that maximum.
             shared.borrow_mut().data.settings.width = 591;
             let before = shared.borrow().data.settings.width;
-            for key in 0..17 {
+            for key in 0..18 {
                 action(dialog, settings, Action::Setting(key, 1));
             }
             let store = shared.borrow().store.clone();
@@ -2471,7 +2518,7 @@ fn run() -> Result<()> {
             std::fs::create_dir_all("artifacts").map_err(|e| Error::new(E_FAIL, e.to_string()))?;
             probes::calendar_checks(root, root_state)?;
             polish_checks::run(root, root_state)?;
-            std::fs::write("artifacts/ui-checks.json",r#"{"settings_roundtrip":true,"all_17_setting_controls_rendered":true,"native_width_and_opacity":true,"task_create_complete_delete":true,"focus_start_reset":true,"calendar_month_grid_and_form_roundtrip":true,"desktop_input_used":false,"startup_modified":false}"#).map_err(|e|Error::new(E_FAIL,e.to_string()))?;
+            std::fs::write("artifacts/ui-checks.json",r#"{"settings_roundtrip":true,"all_18_setting_controls_rendered":true,"native_width_and_opacity":true,"task_create_complete_delete":true,"focus_start_reset":true,"calendar_month_grid_and_form_roundtrip":true,"desktop_input_used":false,"startup_modified":false}"#).map_err(|e|Error::new(E_FAIL,e.to_string()))?;
         }
         let mut motion_probe = if offscreen && std::env::args().any(|a| a == "--motion-probe") {
             let w = &mut *(GetWindowLongPtrW(root, GWLP_USERDATA) as *mut Window);

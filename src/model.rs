@@ -13,6 +13,7 @@ pub struct Settings {
     pub motion: bool,
     pub sound: bool,
     pub startup: bool,
+    pub taskbar_layout: bool,
     pub theme: usize,
     pub album_colors: bool,
     pub show_lyrics: bool,
@@ -35,6 +36,7 @@ impl Default for Settings {
             motion: true,
             sound: true,
             startup: false,
+            taskbar_layout: false,
             theme: 0,
             album_colors: true,
             show_lyrics: true,
@@ -72,6 +74,7 @@ impl Settings {
             }
             15 => self.album_colors = !self.album_colors,
             16 => self.show_lyrics = !self.show_lyrics,
+            17 => self.taskbar_layout = !self.taskbar_layout,
             _ => return Err("Pengaturan tidak dikenal.".into()),
         }
         self.normalize();
@@ -244,6 +247,15 @@ pub fn active_hours(hour: u8, start: u8, end: u8) -> bool {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn taskbar_layout_is_opt_in_for_legacy_settings_and_persists() {
+        let mut settings: super::Settings = serde_json::from_str("{}").unwrap();
+        assert!(!settings.taskbar_layout);
+        settings.adjust(17, 1).unwrap();
+        let loaded: super::Settings =
+            serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert!(loaded.taskbar_layout);
+    }
     use super::*;
     #[test]
     fn bounds_are_safe() {

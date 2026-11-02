@@ -121,6 +121,12 @@ Keep diagnostic output local and use synthetic data in reports.
 
 ## Releases
 
+`Horizon.exe --taskbar-layout-on` asks the running instance to enable and save
+the top-taskbar overlay. It is idempotent; the same option can be changed in
+Settings → Perilaku. Every size overlays the bar at the top edge. Verify actual
+stacking with the installed taskbar/customization on the target desktop; an
+offscreen test cannot prove Explorer's visible stacking behavior.
+
 Build from an identified commit and rerun the checks. Review ZIP contents and
 licenses, manually verify live Windows integrations, then tag the version matching
 `Cargo.toml`. Attach the ZIP and SHA-256 file to a GitHub Release. CI uploads

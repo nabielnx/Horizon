@@ -106,8 +106,17 @@ The main UI frame clock also services the Settings window when its interaction
 or page transition is active, without a separate animation timer. Radius controls
 map the stored legacy value onto the actual expanded contour (default 32 px).
 Opacity is labelled for Air and Berkas, which retain their configurable shell
-opacity. Native verification checks all 17 settings, their saved round trip,
+opacity. Native verification checks all 18 settings, their saved round trip,
 action bounds and Settings hover frame scheduling.
+
+The Perilaku page includes “Tampil di atas taskbar”. All shell sizes stay at
+the same top-screen anchor and overlay the primary top taskbar when enabled.
+The feature repairs stacking order only when the taskbar is actually above
+Horizon. A foreground-change notification prompts a policy check, and the
+existing periodic policy refresh reacquires the taskbar after Explorer changes.
+It does not move/reparent the taskbar, reserve work area or change input regions.
+Fullscreen hiding remains governed by the existing shell policy. Legacy data
+defaults this option off; it is persisted as the eighteenth setting.
 
 The shell contour also masks the Direct2D frame with per-pixel antialiasing.
 DWM receives a premultiplied-alpha surface while the content stays opaque.

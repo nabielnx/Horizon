@@ -256,24 +256,32 @@ impl Window {
                         s.startup,
                         184,
                     );
-                    self.settings_card(c, 278., 150.);
-                    self.settings_caption(c, "AKSES CEPAT", 293.);
-                    c.text("Ctrl + Alt + H", X + 18., 327., 154., 12., true, INK);
+                    self.settings_switch(
+                        c,
+                        "Tampil di atas taskbar",
+                        "Semua ukuran menimpa taskbar di tepi atas layar.",
+                        17,
+                        s.taskbar_layout,
+                        260,
+                    );
+                    self.settings_card(c, 348., 128.);
+                    self.settings_caption(c, "AKSES CEPAT", 362.);
+                    c.text("Ctrl + Alt + H", X + 18., 391., 154., 12., true, INK);
                     c.text(
                         "Buka / ringkas panel",
                         X + 200.,
-                        328.,
+                        392.,
                         247.,
                         11.,
                         false,
                         MUTED_TEXT,
                     );
-                    c.rect(X + 18., 359., W - 36., 1., 0., 0x343840);
-                    c.text("Klik kanan panel", X + 18., 382., 166., 12., true, INK);
+                    c.rect(X + 18., 421., W - 36., 1., 0., 0x343840);
+                    c.text("Klik kanan panel", X + 18., 441., 166., 12., true, INK);
                     c.text(
                         "Buka pengaturan",
                         X + 200.,
-                        383.,
+                        442.,
                         247.,
                         11.,
                         false,

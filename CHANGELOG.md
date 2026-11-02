@@ -2,6 +2,10 @@
 
 ## 0.3.0 — Unreleased
 
+- Add an opt-in top-taskbar overlay for compact, medium and expanded Horizon.
+  Foreground notifications and the existing policy refresh repair its stacking
+  order without taking focus, moving Explorer or adding an animation timer.
+
 - Rebuild all seven Settings pages with consistent white icons, neutral glass
   cards, aligned value controls, animated switches and an automatic-save footer.
   Settings interactions now share the UI animation clock. Radius changes affect
