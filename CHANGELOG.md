@@ -2,6 +2,14 @@
 
 ## 0.3.0 — Unreleased
 
+- Center the actual play glyph in medium and expanded music controls, including
+  hover/press offsets and narrower layouts.
+- Add three softly moving, cover-coloured glows behind expanded lyrics. Smooth
+  random paths reuse the existing frame clock and cached brushes; pause and
+  disabled motion freeze the effect without resetting its position.
+- Compact activity icons and artwork share a glass plate with an inset cover,
+  face reflection and one fading rim instead of stacked solid outlines.
+
 - Music transport buttons share one opaque glass surface with a fading white
   reflection, including play/pause in medium mode. Glyph-only assets prevent
   baked-in fills and mismatched hover outlines from stacking.

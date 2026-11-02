@@ -104,15 +104,7 @@ impl CompactActivity {
 
 unsafe fn mono_badge(c: &Canvas, icon: &'static str, b: (f32, f32, f32, f32)) {
     unsafe {
-        c.rect(b.0, b.1, b.2, b.3, b.2 * 0.28, 0x303030);
-        c.outline(
-            b.0 + 0.4,
-            b.1 + 0.4,
-            b.2 - 0.8,
-            b.3 - 0.8,
-            b.2 * 0.28,
-            0x666666,
-        );
+        c.glass_button(b, b.2 * 0.28, false);
         c.icon(
             icon,
             b.0 + b.2 * 0.12,
@@ -259,7 +251,7 @@ impl Window {
             if track.playing {
                 asset(c, "peek-pause", (b.0, b.1 + dy, b.2, b.3));
             } else {
-                c.icon("play", b.0 + 8., b.1 + 7.5 + dy, 24., 0xffffff);
+                c.icon_centered("play", (b.0, b.1 + dy, b.2, b.3), 24.);
             }
             self.figma_hit(b, Action::Media(0));
         }
@@ -392,22 +384,24 @@ impl Window {
                         self.page,
                     );
                     let icon_bounds = (left + 24., 10., 29., 29.);
-                    let cover_drawn = context == 0
-                        && track.cover.as_ref().is_some_and(|bytes| {
-                            c.cover_rect(
-                                &format!(
-                                    "{}|{}|{}",
-                                    track.title, track.artist, track.cover_revision
-                                ),
-                                bytes,
-                                icon_bounds,
-                                8.,
-                            )
-                            .is_ok()
-                        });
+                    let mut cover_drawn = false;
+                    let dy = c.glass_content(icon_bounds, 8., self.figma_hover(icon_bounds), |b| {
+                        cover_drawn = context == 0
+                            && track.cover.as_ref().is_some_and(|bytes| {
+                                c.cover_rect(
+                                    &format!(
+                                        "{}|{}|{}",
+                                        track.title, track.artist, track.cover_revision
+                                    ),
+                                    bytes,
+                                    (b.0 + 1.2, b.1 + 1.2, b.2 - 2.4, b.3 - 2.4),
+                                    6.8,
+                                )
+                                .is_ok()
+                            });
+                    });
                     if !cover_drawn {
-                        mono_badge(
-                            c,
+                        c.icon_centered(
                             [
                                 "music-notes",
                                 "timer",
@@ -416,10 +410,15 @@ impl Window {
                                 "list-checks",
                                 "files",
                             ][context],
-                            icon_bounds,
+                            (
+                                icon_bounds.0,
+                                icon_bounds.1 + dy,
+                                icon_bounds.2,
+                                icon_bounds.3,
+                            ),
+                            22.,
                         );
                     }
-                    c.outline(left + 24.35, 10.35, 28.3, 28.3, 9.1, 0x999999);
                     if let Some(notice) = &self.power_notice {
                         label(
                             c,
@@ -500,6 +499,14 @@ impl Window {
                     (0., 0., width.max(591.), 270.),
                     self.palette.sample(Instant::now())[0],
                 );
+                if s.show_lyrics {
+                    c.lyric_glow(
+                        (382., 0., width.max(591.) - 402., host_height() as f32),
+                        self.palette.sample(Instant::now()),
+                        self.lyric_glow_phase,
+                        self.lyric_glow_seed,
+                    );
+                }
             }
             self.figma_sidebar(c);
             match self.page {
@@ -688,7 +695,7 @@ impl Window {
                 self.figma_asset_button(c, "media-pause", (187., 204., 50., 50.), Action::Media(0));
             } else {
                 let dy = self.figma_plate(c, (187., 204., 50., 50.), 17., Action::Media(0));
-                c.icon("play", 202., 217. + dy, 24., 0xffffff);
+                c.icon_centered("play", (187., 204. + dy, 50., 50.), 24.);
             }
             self.figma_asset_button(c, "media-next", (244., 204., 50., 50.), Action::Media(2));
             let favorite = state

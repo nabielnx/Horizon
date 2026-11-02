@@ -186,6 +186,8 @@ struct Window {
     input_layout: Option<[i32; 8]>,
     calendar: calendar::Calendar,
     palette: motion::Palette,
+    lyric_glow_phase: f64,
+    lyric_glow_seed: u64,
     lyric_key: Option<String>,
     overlay: Option<Overlay>,
     expansion_velocity: f32,
@@ -1911,6 +1913,10 @@ unsafe fn create(shared: Rc<RefCell<Shared>>, settings: bool, offscreen: bool) -
         input_layout: None,
         calendar: calendar::Calendar::default(),
         palette: motion::Palette::default(),
+        lyric_glow_phase: 0.,
+        lyric_glow_seed: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos() as u64),
         lyric_key: None,
         overlay: None,
         expansion_velocity: 0.,

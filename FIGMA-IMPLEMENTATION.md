@@ -62,6 +62,20 @@ white glyph. Hover and press move the complete surface and glyph together;
 they do not introduce another corner radius. The `*-glyph.svg`/PNG derivatives
 remove the exported background rectangle; original exports remain unchanged.
 
+Play uses its actual vector ink bounds for centering, rather than the SVG
+viewport's asymmetric whitespace. The compact left activity plate also uses
+the shared material: artwork is inset inside the 29 px plate, with reflection
+drawn above it and one rim. Context glyphs stay white and share that same plate.
+
+Expanded lyrics receive three soft cover-coloured radial glows behind the
+text. An application seed selects smooth random paths for position, radius and
+intensity; the same phase is stable on repeated paints. The existing frame
+clock advances this phase only for playing music with lyrics, album colours
+and motion enabled on the expanded Music page. Pause, seek and reopening do
+not reset the glow. Three brushes are reused until the palette changes, and
+overlapping brightness is bounded to preserve white lyric contrast. No new
+timer, rendering thread, image or runtime dependency is introduced.
+
 The shell contour also masks the Direct2D frame with per-pixel antialiasing.
 DWM receives a premultiplied-alpha surface while the content stays opaque.
 The matching Win32 region has a one-pixel guard so it cannot cut off fractional

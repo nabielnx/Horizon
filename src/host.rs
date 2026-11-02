@@ -126,6 +126,20 @@ pub(super) unsafe fn frame_step(hwnd: HWND, w: &mut Window) {
     let dt = w.frame_tick.elapsed().as_secs_f32().min(0.05);
     w.frame_tick = now;
     let motion = w.shared.borrow().data.settings.motion;
+    if motion && w.expanded && w.page == 0 {
+        let state = w.shared.borrow();
+        if state.data.settings.album_colors
+            && state.data.settings.show_lyrics
+            && state.media.as_ref().is_some_and(|media| {
+                media
+                    .snapshot
+                    .lock()
+                    .is_ok_and(|track| track.playing && track.palette.is_some())
+            })
+        {
+            w.lyric_glow_phase += f64::from(dt);
+        }
+    }
     if w.feedback
         .is_some_and(|(_, start)| !motion || start.elapsed().as_millis() >= 350)
     {
