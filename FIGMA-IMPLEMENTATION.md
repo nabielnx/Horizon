@@ -106,7 +106,7 @@ The main UI frame clock also services the Settings window when its interaction
 or page transition is active, without a separate animation timer. Radius controls
 map the stored legacy value onto the actual expanded contour (default 32 px).
 Opacity is labelled for Air and Berkas, which retain their configurable shell
-opacity. Native verification checks all 18 settings, their saved round trip,
+opacity. Native verification checks all 19 settings, their saved round trip,
 action bounds and Settings hover frame scheduling.
 
 The Perilaku page includes “Tampil di atas taskbar”. All shell sizes stay at
@@ -117,6 +117,17 @@ existing periodic policy refresh reacquires the taskbar after Explorer changes.
 It does not move/reparent the taskbar, reserve work area or change input regions.
 Fullscreen hiding remains governed by the existing shell policy. Legacy data
 defaults this option off; it is persisted as the eighteenth setting.
+
+The Music settings include opt-in Apple artwork fallback (nineteenth control).
+Windows thumbnails read from offset zero and remain preferred; a separate
+bounded worker searches Apple only after four seconds without artwork. Exact
+title/artist/version must match. The same album is preferred; an alternate
+release needs a unique cover and duration within 1.5 seconds. Competing covers
+are rejected. Native artwork arriving during
+lookup wins, and stale results never cross track identities. Artwork caching
+is memory-only (four entries, 1 MiB). Fallback artwork carries a clickable Apple
+Music credit in the expanded player's source row. Network errors do not affect
+the independent LRCLIB cooldown or the UI thread.
 
 The shell contour also masks the Direct2D frame with per-pixel antialiasing.
 DWM receives a premultiplied-alpha surface while the content stays opaque.

@@ -2,6 +2,7 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 mod artwork;
 mod calendar;
+mod cover_fallback;
 mod figma_ui;
 mod focus_ui;
 mod host;
@@ -103,6 +104,7 @@ enum Action {
     Media(u8),
     Seek,
     Favorite,
+    CoverSource,
     Drink,
     DrinkAmount(u32),
     ResetWater,
@@ -769,6 +771,17 @@ unsafe fn action(hwnd: HWND, w: &mut Window, a: Action) {
         begin_transition(w, false, motion::CONTENT);
     }
     match a {
+        Action::CoverSource => {
+            let link = w.shared.borrow().media.as_ref().and_then(|m| {
+                m.snapshot
+                    .lock()
+                    .ok()
+                    .and_then(|t| t.cover_source_url.clone())
+            });
+            if let Some(link) = link {
+                let _ = calendar::open_url(hwnd, &link);
+            }
+        }
         Action::Settings => {
             let _ = create(w.shared.clone(), true, w.offscreen);
         }
@@ -1319,10 +1332,20 @@ unsafe fn action(hwnd: HWND, w: &mut Window, a: Action) {
                 let _ = m.send.send(media::Command::LyricsChanged);
             }
             if k == 4 {
+                // Motion changes also wake the main shell.
                 let root = w.shared.borrow().notch;
                 if !root.is_invalid() {
                     let _ = PostMessageW(Some(root), WM_APP + 8, WPARAM(0), LPARAM(0));
                 }
+            }
+            if k == 18
+                && let Some(media) = &w.shared.borrow().media
+            {
+                media.cover_fallback_enabled.store(
+                    w.shared.borrow().data.settings.cover_fallback,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                let _ = media.send.send(media::Command::Refresh);
             }
         }
     }
@@ -1686,6 +1709,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         m if m == WM_APP + 14 => {
             if !w.settings {
                 update_policy(hwnd, w);
+            }
+            LRESULT(0)
+        }
+        m if m == WM_APP + 15 => {
+            if !w.settings && !w.shared.borrow().data.settings.cover_fallback {
+                action(hwnd, w, Action::Setting(18, 1));
             }
             LRESULT(0)
         }
@@ -2244,6 +2273,20 @@ impl Drop for Instance {
     }
 }
 fn run() -> Result<()> {
+    if std::env::args().any(|arg| arg == "--cover-fallback-probe") {
+        return probes::cover_fallback_diagnostics();
+    }
+    if std::env::args().any(|arg| arg == "--cover-fallback-on") {
+        unsafe {
+            PostMessageW(
+                Some(FindWindowW(w!("Horizon.Native"), w!("Horizon"))?),
+                WM_APP + 15,
+                WPARAM(0),
+                LPARAM(0),
+            )?;
+        }
+        return Ok(());
+    }
     if std::env::args().any(|arg| arg == "--taskbar-layout-on") {
         unsafe {
             PostMessageW(
@@ -2321,7 +2364,10 @@ fn run() -> Result<()> {
         let media = if offscreen {
             None
         } else {
-            Some(media::Media::start(data.settings.show_lyrics))
+            Some(media::Media::start(
+                data.settings.show_lyrics,
+                data.settings.cover_fallback,
+            ))
         };
         let shared = Rc::new(RefCell::new(Shared {
             alert: data.reminders.current(),
@@ -2467,14 +2513,14 @@ fn run() -> Result<()> {
                 ));
             }
             settings.pointer = (-1, -1);
-            if wired != (0..18).collect() {
+            if wired != (0..19).collect() {
                 return Err(Error::new(E_FAIL, "Some settings controls are missing"));
             }
             // Exercise a width change below the configured maximum, including
             // when the current default already starts at that maximum.
             shared.borrow_mut().data.settings.width = 591;
             let before = shared.borrow().data.settings.width;
-            for key in 0..18 {
+            for key in 0..19 {
                 action(dialog, settings, Action::Setting(key, 1));
             }
             let store = shared.borrow().store.clone();
@@ -2518,7 +2564,7 @@ fn run() -> Result<()> {
             std::fs::create_dir_all("artifacts").map_err(|e| Error::new(E_FAIL, e.to_string()))?;
             probes::calendar_checks(root, root_state)?;
             polish_checks::run(root, root_state)?;
-            std::fs::write("artifacts/ui-checks.json",r#"{"settings_roundtrip":true,"all_18_setting_controls_rendered":true,"native_width_and_opacity":true,"task_create_complete_delete":true,"focus_start_reset":true,"calendar_month_grid_and_form_roundtrip":true,"desktop_input_used":false,"startup_modified":false}"#).map_err(|e|Error::new(E_FAIL,e.to_string()))?;
+            std::fs::write("artifacts/ui-checks.json",r#"{"settings_roundtrip":true,"all_19_setting_controls_rendered":true,"native_width_and_opacity":true,"task_create_complete_delete":true,"focus_start_reset":true,"calendar_month_grid_and_form_roundtrip":true,"desktop_input_used":false,"startup_modified":false}"#).map_err(|e|Error::new(E_FAIL,e.to_string()))?;
         }
         let mut motion_probe = if offscreen && std::env::args().any(|a| a == "--motion-probe") {
             let w = &mut *(GetWindowLongPtrW(root, GWLP_USERDATA) as *mut Window);

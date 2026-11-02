@@ -30,6 +30,8 @@ pub struct Track {
     pub cover_revision: u64,
     pub cover_error: String,
     pub cover_attempts: u8,
+    pub cover_failures: std::collections::VecDeque<String>,
+    pub cover_source_url: Option<String>,
     pub palette: Option<[u32; 3]>,
     pub lyrics: Arc<Vec<crate::lyrics::Line>>,
     pub lyrics_loaded: bool,
@@ -77,6 +79,7 @@ pub struct Media {
     pub snapshot: Arc<Mutex<Track>>,
     pub send: mpsc::Sender<Command>,
     pub lyrics_enabled: Arc<AtomicBool>,
+    pub cover_fallback_enabled: Arc<AtomicBool>,
     pub notify: Arc<AtomicUsize>,
 }
 pub fn notify(target: &AtomicUsize) {
@@ -122,50 +125,7 @@ fn read_thumbnail(
 ) -> windows::core::Result<(Arc<Vec<u8>>, [u32; 3])> {
     let deadline = Instant::now() + Duration::from_secs(4);
     let stream = await_operation(props.Thumbnail()?.OpenReadAsync()?, deadline, alive)?;
-    let bytes = (|| -> windows::core::Result<Vec<u8>> {
-        const LIMIT: usize = 25_000_000;
-        let size = stream.Size().unwrap_or(0) as usize;
-        if size > LIMIT {
-            return Err(windows::core::Error::new(
-                windows::Win32::Foundation::E_INVALIDARG,
-                "Media thumbnail exceeds byte limit",
-            ));
-        }
-        let reader = DataReader::CreateDataReader(&stream)?;
-        let result = (|| {
-            reader.SetInputStreamOptions(InputStreamOptions::Partial)?;
-            let mut bytes = Vec::with_capacity(size.min(512 * 1024));
-            loop {
-                // Some players expose a stream before a useful Size is known.
-                // Read actual partial chunks, keeping both time and bytes bounded.
-                let to_read = if size > 0 {
-                    if bytes.len() >= size {
-                        break;
-                    }
-                    (size - bytes.len()).min(64 * 1024)
-                } else {
-                    (LIMIT + 1 - bytes.len()).min(64 * 1024)
-                };
-                let loaded =
-                    await_operation(reader.LoadAsync(to_read as u32)?, deadline, alive)? as usize;
-                if loaded == 0 {
-                    break;
-                }
-                if bytes.len() + loaded > LIMIT {
-                    return Err(windows::core::Error::new(
-                        windows::Win32::Foundation::E_INVALIDARG,
-                        "Media thumbnail exceeds byte limit",
-                    ));
-                }
-                let offset = bytes.len();
-                bytes.resize(offset + loaded, 0);
-                reader.ReadBytes(&mut bytes[offset..])?;
-            }
-            Ok(bytes)
-        })();
-        let _ = reader.Close();
-        result
-    })();
+    let bytes = read_cover_stream(&windows::core::Interface::cast(&stream)?, deadline, alive);
     let _ = stream.Close();
     validated_thumbnail(bytes?).ok_or_else(|| {
         windows::core::Error::new(
@@ -175,7 +135,57 @@ fn read_thumbnail(
     })
 }
 
-fn track_cover_key(track: &Track) -> String {
+fn read_cover_stream(
+    stream: &windows::Storage::Streams::IRandomAccessStream,
+    deadline: Instant,
+    alive: &impl Fn() -> bool,
+) -> windows::core::Result<Vec<u8>> {
+    const LIMIT: usize = 25_000_000;
+    let size = stream.Size().unwrap_or(0) as usize;
+    if size > LIMIT {
+        return Err(windows::core::Error::new(
+            windows::Win32::Foundation::E_INVALIDARG,
+            "Media thumbnail exceeds byte limit",
+        ));
+    }
+    let input = stream.GetInputStreamAt(0)?;
+    let reader = DataReader::CreateDataReader(&input)?;
+    let result = (|| {
+        reader.SetInputStreamOptions(InputStreamOptions::Partial)?;
+        let mut bytes = Vec::with_capacity(size.min(512 * 1024));
+        loop {
+            // Some players expose a stream before a useful Size is known.
+            // Read actual partial chunks, keeping both time and bytes bounded.
+            let to_read = if size > 0 {
+                if bytes.len() >= size {
+                    break;
+                }
+                (size - bytes.len()).min(64 * 1024)
+            } else {
+                (LIMIT + 1 - bytes.len()).min(64 * 1024)
+            };
+            let loaded =
+                await_operation(reader.LoadAsync(to_read as u32)?, deadline, alive)? as usize;
+            if loaded == 0 {
+                break;
+            }
+            if bytes.len() + loaded > LIMIT {
+                return Err(windows::core::Error::new(
+                    windows::Win32::Foundation::E_INVALIDARG,
+                    "Media thumbnail exceeds byte limit",
+                ));
+            }
+            let offset = bytes.len();
+            bytes.resize(offset + loaded, 0);
+            reader.ReadBytes(&mut bytes[offset..])?;
+        }
+        Ok(bytes)
+    })();
+    let _ = reader.Close();
+    result
+}
+
+pub(crate) fn track_cover_key(track: &Track) -> String {
     format!(
         "{}|{}|{}|{}",
         track.source_app, track.title, track.artist, track.album
@@ -190,6 +200,31 @@ fn keep_last_track(state: &Mutex<Track>, source_app: &str) -> bool {
     }
     *data = Track::default();
     false
+}
+fn same_song(data: &Track, source: &str, title: &str, artist: &str) -> bool {
+    data.source_app == source && data.title == title && data.artist == artist
+}
+fn remember_cover_failure(data: &mut Track, error: &str) {
+    if data.cover_failures.len() >= 12 {
+        data.cover_failures.pop_front();
+    }
+    data.cover_failures.push_back(format!(
+        "{} | attempt {} | {} | {}",
+        data.title.chars().take(128).collect::<String>(),
+        data.cover_attempts,
+        chrono::Local::now().format("%H:%M:%S"),
+        error.chars().take(512).collect::<String>()
+    ));
+}
+fn apply_fallback(data: &mut Track, key: &str, art: crate::cover_fallback::Artwork) -> bool {
+    if data.cover.is_some() || track_cover_key(data) != key {
+        return false;
+    }
+    data.cover = Some(art.bytes);
+    data.palette = Some(art.palette);
+    data.cover_source_url = Some(art.link);
+    data.cover_revision = data.cover_revision.wrapping_add(1);
+    true
 }
 struct CoverJob {
     key: String,
@@ -295,13 +330,16 @@ impl Media {
             snapshot: Arc::new(Mutex::new(track)),
             send,
             lyrics_enabled: Arc::new(AtomicBool::new(true)),
+            cover_fallback_enabled: Arc::new(AtomicBool::new(false)),
             notify: Arc::new(AtomicUsize::new(0)),
         }
     }
 
-    pub fn start(lyrics_enabled: bool) -> Self {
+    pub fn start(lyrics_enabled: bool, artwork_fallback: bool) -> Self {
         let snapshot = Arc::new(Mutex::new(Track::default()));
         let enabled = Arc::new(AtomicBool::new(lyrics_enabled));
+        let fallback_enabled = Arc::new(AtomicBool::new(artwork_fallback));
+        let fallback_config = fallback_enabled.clone();
         let target = Arc::new(AtomicUsize::new(0));
         let lyric_jobs = crate::lyrics::worker(snapshot.clone(), enabled.clone(), target.clone());
         let (send, receive) = mpsc::channel();
@@ -341,7 +379,59 @@ impl Media {
                 let mut cover_pending = false;
                 let mut cover_refresh_requested = true;
                 let mut cover_recheck_at = None;
+                let mut missing_since: Option<Instant> = None;
+                let (fallback_jobs, fallback_results) = crate::cover_fallback::worker(
+                    state.clone(),
+                    fallback_config.clone(),
+                    events.clone(),
+                );
+                let mut fallback_pending = false;
+                let mut next_fallback = Instant::now() + Duration::from_secs(4);
                 loop {
+                    while let Ok(result) = fallback_results.try_recv() {
+                        fallback_pending = false;
+                        if let Ok(mut data) = state.lock()
+                            && fallback_config.load(Ordering::Relaxed)
+                            && track_cover_key(&data) == result.key
+                            && data.cover.is_none()
+                        {
+                            match result.image {
+                                Ok(art) => {
+                                    apply_fallback(&mut data, &result.key, art);
+                                }
+                                Err(error) => {
+                                    remember_cover_failure(&mut data, &format!("Apple: {error}"));
+                                }
+                            }
+                            notify(&gui);
+                        }
+                    }
+                    if fallback_config.load(Ordering::Relaxed)
+                        && !fallback_pending
+                        && Instant::now() >= next_fallback
+                    {
+                        let job = state
+                            .lock()
+                            .ok()
+                            .filter(|data| {
+                                data.cover.is_none()
+                                    && !data.title.is_empty()
+                                    && !data.artist.is_empty()
+                            })
+                            .map(|data| crate::cover_fallback::Job {
+                                key: track_cover_key(&data),
+                                title: data.title.clone(),
+                                artist: data.artist.clone(),
+                                album: data.album.clone(),
+                                duration: data.duration,
+                            });
+                        if let Some(job) = job
+                            && fallback_jobs.try_send(job).is_ok()
+                        {
+                            fallback_pending = true;
+                            next_fallback = Instant::now() + Duration::from_secs(30);
+                        }
+                    }
                     if cover_recheck_at.is_some_and(|at: Instant| at <= Instant::now()) {
                         cover_refresh_requested = true;
                         next_cover = Instant::now();
@@ -361,6 +451,7 @@ impl Media {
                                         (result.key, cover.clone(), Some(palette)),
                                     );
                                     data.cover = Some(cover);
+                                    data.cover_source_url = None;
                                     data.palette = Some(palette);
                                     if changed {
                                         data.cover_revision = data.cover_revision.wrapping_add(1);
@@ -372,6 +463,8 @@ impl Media {
                                         refresh = true;
                                     }
                                     data.cover_error = error.to_string();
+                                    let error = data.cover_error.clone();
+                                    remember_cover_failure(&mut data, &error);
                                 }
                             }
                             notify(&gui);
@@ -405,6 +498,7 @@ impl Media {
                         }
 
                         if let Some(session) = valid_session {
+                            missing_since = None;
                             let source_app = session
                                 .SourceAppUserModelId()
                                 .map(|s| s.to_string())
@@ -434,7 +528,7 @@ impl Media {
                                     props.Title().map(|s| s.to_string()).unwrap_or_default();
                                 let artist =
                                     props.Artist().map(|s| s.to_string()).unwrap_or_default();
-                                if title.is_empty() && artist.is_empty() {
+                                if title.is_empty() {
                                     let same_player = keep_last_track(&state, &source_app);
                                     attached = Some((session, media, play));
                                     next_metadata = Instant::now() + Duration::from_millis(500);
@@ -466,6 +560,7 @@ impl Media {
                                             cover_retries = 0;
                                             next_cover = Instant::now();
                                             cover_refresh_requested = true;
+                                            next_fallback = Instant::now() + Duration::from_secs(4);
                                             cover_recheck_at =
                                                 Some(Instant::now() + Duration::from_secs(3));
                                         }
@@ -478,24 +573,46 @@ impl Media {
                                         let mut should_notify = false;
                                         if let Ok(mut data) = state.lock() {
                                             if changed {
-                                                data.source_app = source_app;
-                                                data.album = album;
-                                                data.title = title;
-                                                data.artist = artist;
-                                                data.duration = 0.;
-                                                data.position = 0.;
-                                                data.updated = None;
-                                                data.seek_guard = None;
-                                                data.cover = cover;
-                                                data.cover_revision =
-                                                    data.cover_revision.wrapping_add(1);
-                                                data.palette = palette;
-                                                data.cover_error.clear();
-                                                data.cover_attempts = 0;
-                                                data.lyrics = Arc::new(vec![]);
-                                                data.lyrics_loaded = false;
-                                                data.lyrics_retry = None;
-                                                data.error.clear();
+                                                let song_changed =
+                                                    !same_song(&data, &source_app, &title, &artist);
+                                                if !song_changed {
+                                                    // Album metadata may arrive late or disappear
+                                                    // briefly. Keep this song's validated image.
+                                                    data.album = album.clone();
+                                                    if let Some(cover) = cover.clone() {
+                                                        if data
+                                                            .cover
+                                                            .as_ref()
+                                                            .is_none_or(|old| **old != *cover)
+                                                        {
+                                                            data.cover_revision =
+                                                                data.cover_revision.wrapping_add(1);
+                                                        }
+                                                        data.cover = Some(cover);
+                                                        data.cover_source_url = None;
+                                                        data.palette = palette;
+                                                    }
+                                                } else {
+                                                    data.source_app = source_app;
+                                                    data.album = album;
+                                                    data.title = title;
+                                                    data.artist = artist;
+                                                    data.duration = 0.;
+                                                    data.position = 0.;
+                                                    data.updated = None;
+                                                    data.seek_guard = None;
+                                                    data.cover = cover;
+                                                    data.cover_source_url = None;
+                                                    data.cover_revision =
+                                                        data.cover_revision.wrapping_add(1);
+                                                    data.palette = palette;
+                                                    data.cover_error.clear();
+                                                    data.cover_attempts = 0;
+                                                    data.lyrics = Arc::new(vec![]);
+                                                    data.lyrics_loaded = false;
+                                                    data.lyrics_retry = None;
+                                                    data.error.clear();
+                                                }
                                                 should_notify = true;
                                             } else if cover.is_some() {
                                                 data.cover = cover;
@@ -527,7 +644,11 @@ impl Media {
                             }
                         } else {
                             attached = None;
-                            if let Ok(mut data) = state.lock() {
+                            next_metadata = Instant::now() + Duration::from_millis(250);
+                            if let Ok(mut data) = state.lock()
+                                && missing_since.get_or_insert_with(Instant::now).elapsed()
+                                    >= Duration::from_millis(1500)
+                            {
                                 *data = Track::default();
                             }
                             requested = None;
@@ -776,6 +897,7 @@ impl Media {
             snapshot,
             send,
             lyrics_enabled: enabled,
+            cover_fallback_enabled: fallback_enabled,
             notify: target,
         }
     }
@@ -783,6 +905,59 @@ impl Media {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn thumbnail_reads_start_at_zero_even_if_provider_cursor_is_at_eof() {
+        use windows::core::Interface;
+        unsafe {
+            let _ = RoInitialize(RO_INIT_MULTITHREADED);
+        }
+        let fixture = include_bytes!("../assets/fixtures/cover.png");
+        let stream = windows::Storage::Streams::InMemoryRandomAccessStream::new().unwrap();
+        let writer = windows::Storage::Streams::DataWriter::CreateDataWriter(&stream).unwrap();
+        writer.WriteBytes(fixture).unwrap();
+        writer.StoreAsync().unwrap().join().unwrap();
+        writer.DetachStream().unwrap();
+        stream.Seek(fixture.len() as u64).unwrap();
+        let bytes = read_cover_stream(
+            &stream.cast().unwrap(),
+            Instant::now() + Duration::from_secs(2),
+            &|| true,
+        )
+        .unwrap();
+        assert_eq!(bytes, fixture);
+        assert!(validated_thumbnail(bytes).is_some());
+    }
+    #[test]
+    fn fallback_cannot_replace_native_artwork_or_cross_a_track_boundary() {
+        let mut data = Track {
+            source_app: "player".into(),
+            title: "A".into(),
+            artist: "Artist".into(),
+            ..Default::default()
+        };
+        let key = track_cover_key(&data);
+        let art = crate::cover_fallback::Artwork {
+            bytes: Arc::new(vec![1, 2]),
+            palette: [0; 3],
+            link: "https://music.apple.com/fixture".into(),
+        };
+        data.title = "B".into();
+        assert!(!apply_fallback(&mut data, &key, art.clone()));
+        data.title = "A".into();
+        data.cover = Some(Arc::new(vec![9]));
+        assert!(!apply_fallback(&mut data, &key, art.clone()));
+        assert_eq!(**data.cover.as_ref().unwrap(), vec![9]);
+        data.cover = None;
+        assert!(apply_fallback(&mut data, &key, art));
+        assert!(data.cover_source_url.is_some());
+        assert_eq!(data.cover_revision, 1);
+        for _ in 0..50 {
+            remember_cover_failure(&mut data, "fixture");
+        }
+        assert_eq!(data.cover_failures.len(), 12);
+        assert!(same_song(&data, "player", "A", "Artist"));
+        assert!(!same_song(&data, "player", "B", "Artist"));
+    }
     #[test]
     fn lyric_selection_respects_exact_starts_ends_pause_and_seek() {
         let mut track = Track {

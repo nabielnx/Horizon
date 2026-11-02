@@ -14,6 +14,7 @@ pub struct Settings {
     pub sound: bool,
     pub startup: bool,
     pub taskbar_layout: bool,
+    pub cover_fallback: bool,
     pub theme: usize,
     pub album_colors: bool,
     pub show_lyrics: bool,
@@ -37,6 +38,7 @@ impl Default for Settings {
             sound: true,
             startup: false,
             taskbar_layout: false,
+            cover_fallback: false,
             theme: 0,
             album_colors: true,
             show_lyrics: true,
@@ -75,6 +77,7 @@ impl Settings {
             15 => self.album_colors = !self.album_colors,
             16 => self.show_lyrics = !self.show_lyrics,
             17 => self.taskbar_layout = !self.taskbar_layout,
+            18 => self.cover_fallback = !self.cover_fallback,
             _ => return Err("Pengaturan tidak dikenal.".into()),
         }
         self.normalize();

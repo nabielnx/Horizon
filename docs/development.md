@@ -121,6 +121,14 @@ Keep diagnostic output local and use synthetic data in reports.
 
 ## Releases
 
+`Horizon.exe --offscreen --cover-fallback-probe` explicitly searches Apple's
+catalogue for the current track and validates/downloads an exact matching image.
+It writes `artifacts/cover-fallback-probe.json` and does not change playback.
+This sends title/artist to Apple; it is never part of normal CI verification.
+`--cover-fallback-on` asks the running instance to enable/save the opt-in setting.
+Live media diagnostics retain twelve recent artwork errors for intermittent
+failures, including failures before a successful retry.
+
 `Horizon.exe --taskbar-layout-on` asks the running instance to enable and save
 the top-taskbar overlay. It is idempotent; the same option can be changed in
 Settings → Perilaku. Every size overlays the bar at the top edge. Verify actual

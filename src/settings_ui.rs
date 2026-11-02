@@ -389,41 +389,39 @@ impl Window {
                         s.show_lyrics,
                         184,
                     );
-                    self.settings_card(c, 278., 150.);
-                    c.icon("music-notes", X + 18., 299., 22., 0xffffff);
+                    self.settings_switch(
+                        c,
+                        "Cover cadangan (Apple)",
+                        "Judul dan artis dikirim saat cover Windows kosong.",
+                        18,
+                        s.cover_fallback,
+                        260,
+                    );
+                    self.settings_card(c, 348., 128.);
                     c.text(
-                        "Musik yang sedang berjalan",
-                        X + 52.,
-                        301.,
-                        388.,
+                        "Musik & sumber konten",
+                        X + 18.,
+                        368.,
+                        W - 36.,
                         12.,
                         true,
                         INK,
                     );
                     c.text(
-                        "Kontrol mengikuti sesi media Windows.",
+                        "Kontrol media mengikuti sesi Windows.",
                         X + 18.,
-                        340.,
+                        401.,
                         W - 36.,
                         11.,
                         false,
                         MUTED_TEXT,
                     );
                     c.text(
-                        "Lirik dari LRCLIB; timing kata mengikuti data lagu.",
+                        "Lirik: LRCLIB. Cover cadangan: Apple Music.",
                         X + 18.,
-                        368.,
+                        432.,
                         W - 36.,
                         11.,
-                        false,
-                        MUTED_TEXT,
-                    );
-                    c.text(
-                        "Warna sampul tetap tersedia saat musik dijeda.",
-                        X + 18.,
-                        396.,
-                        W - 36.,
-                        10.5,
                         false,
                         MUTED_TEXT,
                     );

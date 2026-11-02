@@ -665,14 +665,18 @@ impl Window {
             );
             let source_y = artist_y + 25.;
             let spotify = track.source_app.to_lowercase().contains("spotify");
-            if spotify {
+            if track.cover_source_url.is_some() {
+                c.icon("external-link", 176., source_y, 18., 0xffffff);
+            } else if spotify {
                 asset(c, "spotify", (176., source_y, 18., 18.));
             } else {
                 c.icon("headphones", 176., source_y, 18., 0xffffff);
             }
             label(
                 c,
-                if spotify {
+                if track.cover_source_url.is_some() {
+                    "Cover Apple Music ↗"
+                } else if spotify {
                     "Play on Spotify"
                 } else {
                     "Media Windows"
@@ -680,7 +684,14 @@ impl Window {
                 (200., source_y + 1., 151.),
                 (10., 600, 0xffffff, 0),
             );
-            self.figma_hit((176., source_y, 175., 20.), Action::Media(0));
+            self.figma_hit(
+                (176., source_y, 175., 20.),
+                if track.cover_source_url.is_some() {
+                    Action::CoverSource
+                } else {
+                    Action::Media(0)
+                },
+            );
             self.figma_idle_wave(c, state, track, (73., 141., 278., 25.));
             label(
                 c,

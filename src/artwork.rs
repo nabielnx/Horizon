@@ -122,8 +122,16 @@ pub fn palette(bytes: &[u8]) -> Option<[u32; 3]> {
         let image = source(bytes, 32).ok()?;
         let mut pixels = [0u8; 4096];
         image.CopyPixels(std::ptr::null(), 128, &mut pixels).ok()?;
-        Some(from_pixels(&pixels))
+        visible_palette(&pixels)
     }
+}
+fn visible_palette(pixels: &[u8]) -> Option<[u32; 3]> {
+    pixels
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .any(|p| p[3] >= 64)
+        .then(|| from_pixels(pixels))
 }
 pub fn from_pixels(pixels: &[u8]) -> [u32; 3] {
     let mut buckets = [[0u32; 4]; 64];
@@ -204,6 +212,11 @@ pub fn from_pixels(pixels: &[u8]) -> [u32; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn transparent_placeholders_are_not_accepted_as_cover_images() {
+        assert!(visible_palette(&[0, 0, 0, 0].repeat(1024)).is_none());
+        assert!(visible_palette(&[0, 0, 0, 255].repeat(1024)).is_some());
+    }
     #[test]
     fn preview_fit_preserves_portrait_landscape_and_small_images() {
         assert_eq!(fit_size(1200, 800, 640, 320), (480, 320));

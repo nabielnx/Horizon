@@ -222,6 +222,9 @@ struct HttpClient {
 }
 impl HttpClient {
     fn new() -> Result<Self> {
+        Self::for_host("lrclib.net")
+    }
+    fn for_host(host: &str) -> Result<Self> {
         unsafe {
             let session = Handle::new(WinHttpOpen(
                 w!("Horizon/0.3 (https://github.com/nabielnx/Horizon)").as_ptr(),
@@ -233,12 +236,92 @@ impl HttpClient {
             if WinHttpSetTimeouts(session.0, 1500, 2000, 2000, 2500) == 0 {
                 return Err(Error::from_thread());
             }
-            let connection =
-                Handle::new(WinHttpConnect(session.0, w!("lrclib.net").as_ptr(), 443, 0))?;
+            let connection = Handle::new(WinHttpConnect(
+                session.0,
+                HSTRING::from(host).as_ptr(),
+                443,
+                0,
+            ))?;
             Ok(Self {
                 connection,
                 _session: session,
             })
+        }
+    }
+}
+/// Bounded HTTPS for artwork, deliberately independent of LRCLIB cooldowns.
+pub(crate) fn artwork_get(
+    host: &str,
+    path: &str,
+    limit: usize,
+    alive: &impl Fn() -> bool,
+) -> Result<Vec<u8>> {
+    unsafe {
+        if !alive() {
+            return Err(Error::from_hresult(windows::Win32::Foundation::E_ABORT));
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
+        let client = HttpClient::for_host(host)?;
+        let path = HSTRING::from(path);
+        let request = Handle::new(WinHttpOpenRequest(
+            client.connection.0,
+            w!("GET").as_ptr(),
+            path.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            0x00800000,
+        ))?;
+        if WinHttpSendRequest(request.0, std::ptr::null(), 0, std::ptr::null(), 0, 0, 0) == 0
+            || WinHttpReceiveResponse(request.0, std::ptr::null_mut()) == 0
+        {
+            return Err(Error::from_thread());
+        }
+        let mut status = 0_u32;
+        let mut size = 4;
+        if WinHttpQueryHeaders(
+            request.0,
+            19 | 0x20000000,
+            std::ptr::null(),
+            (&mut status as *mut u32).cast(),
+            &mut size,
+            std::ptr::null_mut(),
+        ) == 0
+        {
+            return Err(Error::from_thread());
+        }
+        if status != 200 {
+            return Err(Error::new(
+                windows::Win32::Foundation::E_FAIL,
+                format!("Artwork HTTP {status}"),
+            ));
+        }
+        let mut bytes = Vec::new();
+        loop {
+            if !alive() || std::time::Instant::now() >= deadline {
+                return Err(Error::from_hresult(windows::Win32::Foundation::E_ABORT));
+            }
+            let mut buf = [0_u8; 8192];
+            let mut count = 0;
+            if WinHttpReadData(
+                request.0,
+                buf.as_mut_ptr().cast(),
+                buf.len() as u32,
+                &mut count,
+            ) == 0
+            {
+                return Err(Error::from_thread());
+            }
+            if count == 0 {
+                return Ok(bytes);
+            }
+            if bytes.len() + count as usize > limit {
+                return Err(Error::new(
+                    windows::Win32::Foundation::E_INVALIDARG,
+                    "Artwork response too large",
+                ));
+            }
+            bytes.extend_from_slice(&buf[..count as usize]);
         }
     }
 }

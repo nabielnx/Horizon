@@ -17,6 +17,11 @@ trademark rights. SF Pro is not bundled.
 The fixture cover in `assets/fixtures` is synthetic test artwork. Actual music
 covers and lyrics are runtime content, not repository or release assets.
 
+Optional fallback artwork is retrieved from Apple's iTunes Search API/CDN,
+not bundled with Horizon. Apple Music attribution links to the matching track
+when fallback art is displayed. Artwork and catalogue data retain their
+respective rights; availability and release artwork can differ from the player.
+
 Rust dependency versions are recorded in `Cargo.lock`; their licenses remain
 with the upstream packages. Optional PNG conversion uses `@resvg/resvg-js`
 (MPL-2.0), which is not included in the application runtime or release bundle.

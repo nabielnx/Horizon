@@ -16,6 +16,8 @@ pub(super) fn running_media_diagnostics(window: &Window) -> Result<()> {
         "coverBytes": track.cover.as_ref().map_or(0, |bytes| bytes.len()),
         "coverError": track.cover_error, "coverAttempts": track.cover_attempts,
         "coverRevision": track.cover_revision, "error": track.error,
+        "recentCoverFailures": track.cover_failures,
+        "coverProvider": if track.cover_source_url.is_some() { "Apple Music" } else { "Windows" },
         "coverRenderError": window.cover_render_error.borrow().as_str(),
         "batteryPercent": window.battery.percent, "batteryCharging": window.battery.charging,
         "chargerConnected": window.battery.plugged, "chargerEffectActive": window.battery.energized(),
@@ -37,7 +39,7 @@ pub(super) fn running_media_diagnostics(window: &Window) -> Result<()> {
 
 pub(super) fn media_diagnostics() -> Result<()> {
     let lyrics_network = std::env::args().any(|a| a == "--lyrics-network");
-    let media = media::Media::start(lyrics_network);
+    let media = media::Media::start(lyrics_network, false);
     let mut samples = Vec::new();
     for second in 1..=6 {
         std::thread::sleep(std::time::Duration::from_secs(1));
@@ -50,6 +52,43 @@ pub(super) fn media_diagnostics() -> Result<()> {
     std::fs::write(
         "artifacts/media-diagnostics.json",
         serde_json::to_vec_pretty(&report).map_err(|e| Error::new(E_FAIL, e.to_string()))?,
+    )
+    .map_err(|e| Error::new(E_FAIL, e.to_string()))?;
+    Ok(())
+}
+
+pub(super) fn cover_fallback_diagnostics() -> Result<()> {
+    unsafe {
+        let _ = windows::Win32::System::WinRT::RoInitialize(
+            windows::Win32::System::WinRT::RO_INIT_MULTITHREADED,
+        );
+    }
+    let media = media::Media::start(false, false);
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let track = media
+        .snapshot
+        .lock()
+        .map_err(|_| Error::new(E_FAIL, "Media snapshot unavailable"))?
+        .clone();
+    let job = crate::cover_fallback::Job {
+        key: media::track_cover_key(&track),
+        title: track.title,
+        artist: track.artist,
+        album: track.album,
+        duration: track.duration,
+    };
+    let result = crate::cover_fallback::lookup(&job, &|| true);
+    let report = match result {
+        Ok(art) => {
+            serde_json::json!({"matched":true, "bytes":art.bytes.len(), "sourceLink":art.link})
+        }
+        Err(error) => {
+            serde_json::json!({"matched":false, "error":error, "title":job.title,"artist":job.artist,"album":job.album,"duration":job.duration})
+        }
+    };
+    std::fs::write(
+        "artifacts/cover-fallback-probe.json",
+        serde_json::to_vec_pretty(&report).unwrap(),
     )
     .map_err(|e| Error::new(E_FAIL, e.to_string()))?;
     Ok(())

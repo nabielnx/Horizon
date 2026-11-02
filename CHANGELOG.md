@@ -2,6 +2,13 @@
 
 ## 0.3.0 — Unreleased
 
+- Read Windows thumbnails explicitly from byte zero, preserve validated artwork
+  through album-only metadata changes and brief missing-session gaps, and keep
+  bounded recent failure diagnostics across successful retries.
+- Add opt-in Apple/iTunes cover fallback when Windows artwork remains missing,
+  with strict recording/release matching, stale-track rejection, bounded memory
+  caching and clickable Apple Music attribution. Windows artwork has priority.
+
 - Add an opt-in top-taskbar overlay for compact, medium and expanded Horizon.
   Foreground notifications and the existing policy refresh repair its stacking
   order without taking focus, moving Explorer or adding an animation timer.
