@@ -19,30 +19,38 @@ pub const HOVER_LEAVE_MS: u64 = 150;
 /// Idle bounds interpolate from the surface actually on screen, not an
 /// assumed compact frame. This prevents Indicator -> Compact -> Peek flashes.
 pub struct Transition {
-    from: Size,
-    to: Size,
-    started: std::time::Instant,
+    axes: [crate::motion::Tween; 3],
     pub current: Size,
 }
 impl Transition {
     pub fn new(from: Size, to: Size, now: std::time::Instant) -> Self {
-        Self {
-            from,
-            to,
-            started: now,
+        let mut transition = Self {
+            axes: [
+                crate::motion::Tween::new(from.width / 1000., now),
+                crate::motion::Tween::new(from.height / 1000., now),
+                crate::motion::Tween::new(from.shape, now),
+            ],
             current: from,
+        };
+        transition.retarget(to, now);
+        transition
+    }
+    pub fn retarget(&mut self, to: Size, now: std::time::Instant) {
+        for (axis, value) in
+            self.axes
+                .iter_mut()
+                .zip([to.width / 1000., to.height / 1000., to.shape])
+        {
+            axis.retarget(value, crate::motion::SHELL, true, now);
         }
     }
     pub fn step(&mut self, now: std::time::Instant) -> bool {
-        let progress =
-            (now.saturating_duration_since(self.started).as_secs_f32() / 0.26).clamp(0., 1.);
-        let t = crate::motion::ease(progress);
         self.current = Size {
-            width: self.from.width + (self.to.width - self.from.width) * t,
-            height: self.from.height + (self.to.height - self.from.height) * t,
-            shape: self.from.shape + (self.to.shape - self.from.shape) * t,
+            width: self.axes[0].sample(now) * 1000.,
+            height: self.axes[1].sample(now) * 1000.,
+            shape: self.axes[2].sample(now),
         };
-        progress < 1.
+        self.axes.iter().any(|axis| axis.active(now))
     }
 }
 
@@ -277,9 +285,9 @@ mod tests {
         assert!(visible.height > indicator.height && visible.height < peek.height);
         let mut closing = Transition::new(visible, indicator, now);
         assert_eq!(closing.current, visible);
-        assert!(!closing.step(now + std::time::Duration::from_millis(300)));
+        assert!(!closing.step(now + std::time::Duration::from_millis(450)));
         assert_eq!(closing.current, indicator);
-        assert!(!opening.step(now + std::time::Duration::from_millis(300)));
+        assert!(!opening.step(now + std::time::Duration::from_millis(450)));
         assert_eq!(opening.current, peek);
     }
 

@@ -97,6 +97,7 @@ pub struct Canvas {
     stroke: ID2D1StrokeStyle,
     glass_motion: Cell<bool>,
     interaction_pressed: Cell<bool>,
+    interaction_pointer: Cell<(f32, f32)>,
     shell_mask: RefCell<Option<(ShellOutline, ID2D1Geometry)>>,
     shell_layer: Cell<bool>,
     #[allow(clippy::type_complexity)]
@@ -190,6 +191,7 @@ impl Canvas {
                 glass_motion: Cell::new(false),
                 glass_states: RefCell::new(HashMap::new()),
                 interaction_pressed: Cell::new(false),
+                interaction_pointer: Cell::new((-1., -1.)),
                 shell_mask: RefCell::new(None),
                 shell_layer: Cell::new(false),
                 cover_cache: RefCell::new(None),
@@ -391,6 +393,10 @@ impl Canvas {
     pub fn set_interaction_pressed(&self, pressed: bool) {
         self.interaction_pressed.set(pressed);
     }
+    pub fn set_interaction_pointer(&self, point: (i32, i32)) {
+        self.interaction_pointer
+            .set((point.0 as f32, point.1 as f32));
+    }
     pub fn animate_value(
         &self,
         b: (f32, f32, f32, f32),
@@ -552,6 +558,16 @@ impl Canvas {
     unsafe fn glass_finish(&self, bounds: (f32, f32, f32, f32), radius: f32, hover: f32) {
         unsafe {
             let (x, y, w, h) = bounds;
+            let mut transform = Matrix3x2::default();
+            self.target.GetTransform(&mut transform);
+            let pointer = self.interaction_pointer.get();
+            let local_x = (pointer.0 - transform.M31) / transform.M11.max(0.001);
+            let local_y = pointer.1 - transform.M32;
+            let follow = if local_x >= x && local_x <= x + w && local_y >= y && local_y <= y + h {
+                (local_x - x - w * 0.5) * hover * 0.6
+            } else {
+                0.
+            };
             // A face reflection is composited over an opaque base. It does not
             // expose wallpaper or include another outline around the icon.
             let face_alpha = (16. + hover.clamp(0., 1.) * 12.) as u32;
@@ -574,9 +590,12 @@ impl Canvas {
                 D2D1_EXTEND_MODE_CLAMP,
             ) && let Ok(brush) = self.target.CreateLinearGradientBrush(
                 &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
-                    startPoint: Vector2 { X: x, Y: y },
+                    startPoint: Vector2 {
+                        X: x + follow,
+                        Y: y,
+                    },
                     endPoint: Vector2 {
-                        X: x + w * 0.25,
+                        X: x + w * 0.25 + follow,
                         Y: y + h,
                     },
                 },
@@ -677,18 +696,22 @@ impl Canvas {
     pub fn has_frame(&self) -> bool {
         self.presented.get()
     }
-    pub unsafe fn overlay(&self, bitmap: &ID2D1Bitmap, opacity: f32, shell: bool) {
+    pub unsafe fn overlay(&self, bitmap: &ID2D1Bitmap, opacity: f32, shell: bool, drift: f32) {
         unsafe {
             let x = if shell { 0. } else { 62. };
             let y = if shell { 0. } else { 14. };
             let bounds = rect(x, y, self.width as f32 - x, self.height as f32 - y);
+            self.target
+                .PushAxisAlignedClip(&bounds, D2D1_ANTIALIAS_MODE_ALIASED);
+            let destination = rect(x, y + drift, self.width as f32 - x, self.height as f32 - y);
             self.target.DrawBitmap(
                 bitmap,
-                Some(&bounds),
+                Some(&destination),
                 opacity,
                 D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
                 Some(&bounds),
             );
+            self.target.PopAxisAlignedClip();
         }
     }
     pub unsafe fn clip_scroll(&self, x: f32, y: f32, w: f32, h: f32, scroll: f32) {

@@ -2,6 +2,12 @@
 
 ## 0.3.0 — Unreleased
 
+- Use velocity-preserving spring motion for shared hover, press, selection and
+  progress channels, including reversible compact/medium shell transitions.
+- Add directional page transitions, animated sidebar selection/press and
+  pointer-reactive glass reflections. Correct click feedback coordinates in
+  centered/scaled views and present the initial mouse press immediately.
+
 - Repair transparent dark native inputs on the alpha shell with buffered opaque
   EDIT painting, including typing, replacement, selection and calendar fields.
 - Use reflective silver glyphs for the medium dashboard clock. Task lists,

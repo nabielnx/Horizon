@@ -258,6 +258,7 @@ struct Overlay {
     started: Instant,
     duration: f32,
     shell: bool,
+    direction: f32,
 }
 const INK: u32 = 0xf2f4f6;
 const MUTED: u32 = 0x8e9aa7;
@@ -485,8 +486,15 @@ fn set_mode(w: &mut Window, next: shell_policy::Mode) {
     let from = w.idle_geometry();
     let settings = &w.shared.borrow().data.settings;
     let to = next.idle_geometry(settings.width as f32);
-    w.idle_transition = (settings.motion && from != to)
-        .then(|| shell_policy::Transition::new(from, to, Instant::now()));
+    if settings.motion && from != to {
+        if let Some(transition) = &mut w.idle_transition {
+            transition.retarget(to, Instant::now());
+        } else {
+            w.idle_transition = Some(shell_policy::Transition::new(from, to, Instant::now()));
+        }
+    } else {
+        w.idle_transition = None;
+    }
     w.mode = next;
 }
 fn update_battery(w: &mut Window, next: power::Battery) -> bool {
@@ -695,7 +703,17 @@ unsafe fn action(hwnd: HWND, w: &mut Window, a: Action) {
         .or_else(|| w.hits.iter().find(|h| h.action == a))
         && let Some(canvas) = &w.canvas
     {
-        canvas.pulse((hit.x, hit.y, hit.w, hit.h));
+        let (scale, offset) = if w.settings {
+            (1., 0.)
+        } else {
+            w.figma_transform()
+        };
+        canvas.pulse((
+            ((hit.x as f32 - offset) / scale).round() as i32,
+            hit.y,
+            (hit.w as f32 / scale).round() as i32,
+            hit.h,
+        ));
     }
     if !w.settings
         && matches!(
@@ -750,7 +768,10 @@ unsafe fn action(hwnd: HWND, w: &mut Window, a: Action) {
         }
         Action::Page(p) => {
             if !w.settings && w.page != p {
-                begin_transition(w, false, motion::STATE);
+                begin_transition(w, false, motion::PAGE);
+                if let Some(overlay) = &mut w.overlay {
+                    overlay.direction = if p > w.page { -1. } else { 1. };
+                }
             }
             if w.page == 5 && p != 5 {
                 w.preview_worker = None;
@@ -1438,6 +1459,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             let _ = InvalidateRect(Some(hwnd), None, false);
             let x = (lp.0 as u16) as i16 as i32;
             let y = ((lp.0 >> 16) as u16) as i16 as i32;
+            w.pointer = (x, y);
+            // Present the physical press before a fast release can overtake it.
+            let _ = UpdateWindow(hwnd);
             if let Some(h) = w.hits.iter().find(|h| {
                 x >= h.x
                     && x < h.x + h.w

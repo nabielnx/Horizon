@@ -218,7 +218,7 @@ impl MotionProbe {
             GetClientRect(hwnd, &mut bounds)?;
             Ok(Self {
                 last: Instant::now(),
-                samples: Vec::with_capacity(120),
+                samples: Vec::with_capacity(180),
                 width: bounds.right,
                 height: bounds.bottom,
                 snapshots: 0,
@@ -295,7 +295,9 @@ impl MotionProbe {
                 action(hwnd, w, Action::Page(0));
                 self.check_snapshot(w)?;
             }
-            if count < 120 {
+            // Include the spring's settling tail after the final page change.
+            // Do not clear interaction state to manufacture an idle result.
+            if count < 180 {
                 return Ok(false);
             }
             w.shared.borrow_mut().media = None;

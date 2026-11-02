@@ -47,6 +47,7 @@ pub(super) unsafe fn begin_transition(w: &mut Window, shell: bool, duration: f32
                 started: Instant::now(),
                 duration,
                 shell,
+                direction: 0.,
             });
     } else {
         w.overlay = None;
@@ -54,7 +55,7 @@ pub(super) unsafe fn begin_transition(w: &mut Window, shell: bool, duration: f32
 }
 pub(super) unsafe fn animate(_hwnd: HWND, w: &mut Window) {
     unsafe {
-        begin_transition(w, true, 0.28);
+        begin_transition(w, true, motion::SHELL);
     }
     if !w.expanded {
         w.preview_worker = None;

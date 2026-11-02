@@ -34,8 +34,9 @@ impl Window {
                     self.overlay = Some(Overlay {
                         bitmap,
                         started: Instant::now(),
-                        duration: 0.18,
+                        duration: motion::CONTENT,
                         shell: !self.expanded,
+                        direction: 0.,
                     });
                 }
                 self.lyric_key = Some(key);
@@ -53,6 +54,7 @@ impl Window {
             self.palette.retarget(colors, animate, now);
             c.set_glass_motion(s.motion && !self.settings);
             c.set_interaction_pressed(self.pressed);
+            c.set_interaction_pointer(self.pointer);
             if !self.settings && self.alpha_shell {
                 if let Err(error) =
                     c.begin_shell_palette(self.palette.sample(now), shell_outline(self))
@@ -71,7 +73,13 @@ impl Window {
             }
             if let Some(overlay) = &self.overlay {
                 let t = (overlay.started.elapsed().as_secs_f32() / overlay.duration).clamp(0., 1.);
-                c.overlay(&overlay.bitmap, 1. - motion::ease(t), overlay.shell);
+                let progress = motion::ease(t);
+                c.overlay(
+                    &overlay.bitmap,
+                    1. - progress,
+                    overlay.shell,
+                    overlay.direction * 12. * progress,
+                );
             }
             if !self.settings
                 && (self.expanded || self.mode == shell_policy::Mode::Peek)

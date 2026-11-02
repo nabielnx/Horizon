@@ -1,10 +1,12 @@
 use std::time::{Duration, Instant};
 
 pub const FRAME: Duration = Duration::from_nanos(8_333_333);
-pub const HOVER: f32 = 0.18;
+pub const HOVER: f32 = 0.20;
 pub const PRESS: f32 = 0.09;
-pub const STATE: f32 = 0.22;
-pub const CONTENT: f32 = 0.16;
+pub const STATE: f32 = 0.26;
+pub const CONTENT: f32 = 0.22;
+pub const PAGE: f32 = 0.30;
+pub const SHELL: f32 = 0.28;
 
 /// Retarget from the visible value, including rapid pointer reversals.
 pub struct Tween {
@@ -12,6 +14,7 @@ pub struct Tween {
     target: f32,
     started: Instant,
     duration: f32,
+    velocity: f32,
 }
 impl Tween {
     pub fn new(value: f32, now: Instant) -> Self {
@@ -20,19 +23,41 @@ impl Tween {
             target: value,
             started: now,
             duration: STATE,
+            velocity: 0.,
         }
     }
     pub fn sample(&self, now: Instant) -> f32 {
-        let t = (now.saturating_duration_since(self.started).as_secs_f32() / self.duration)
-            .clamp(0., 1.);
-        self.from + (self.target - self.from) * ease(t)
+        self.state(now).0
+    }
+    fn state(&self, now: Instant) -> (f32, f32) {
+        let t = now.saturating_duration_since(self.started).as_secs_f32();
+        if t >= self.duration * 1.5 {
+            return (self.target, 0.);
+        }
+        let omega = 8. / self.duration;
+        let offset = self.from - self.target;
+        let c = self.velocity + omega * offset;
+        let decay = (-omega * t).exp();
+        let value = self.target + (offset + c * t) * decay;
+        let velocity = (self.velocity - omega * c * t) * decay;
+        // Shared channels also drive opacity and progress; never exceed bounds.
+        let low = self.from.min(self.target).min(0.);
+        let high = self.from.max(self.target).max(1.);
+        if value < low || value > high {
+            (value.clamp(low, high), 0.)
+        } else {
+            (value, velocity)
+        }
     }
     pub fn retarget(&mut self, value: f32, duration: f32, enabled: bool, now: Instant) -> f32 {
         if !enabled {
             self.from = value;
             self.target = value;
+            self.velocity = 0.;
         } else if self.target != value {
-            self.from = self.sample(now);
+            let (visible, velocity) = self.state(now);
+            self.from = visible;
+            self.velocity = velocity;
             self.target = value;
             self.started = now;
             self.duration = duration.max(0.001);
@@ -41,7 +66,7 @@ impl Tween {
     }
     pub fn active(&self, now: Instant) -> bool {
         self.from != self.target
-            && now.saturating_duration_since(self.started).as_secs_f32() < self.duration
+            && now.saturating_duration_since(self.started).as_secs_f32() < self.duration * 1.5
     }
 }
 
@@ -233,11 +258,30 @@ mod tests {
         assert!(visible > 0. && visible < 1.);
         assert_eq!(value.retarget(0., HOVER, true, halfway), visible);
         assert!(value.active(halfway));
-        let end = halfway + Duration::from_millis(200);
+        let end = halfway + Duration::from_millis(320);
         assert_eq!(value.sample(end), 0.);
         assert!(!value.active(end));
         assert_eq!(value.retarget(1., STATE, false, end), 1.);
         assert!(!value.active(end));
+    }
+    #[test]
+    fn spring_retarget_preserves_velocity_and_is_frame_rate_independent() {
+        let start = Instant::now();
+        let mut value = Tween::new(0., start);
+        value.retarget(1., HOVER, true, start);
+        let reverse = start + Duration::from_millis(35);
+        let before = value.state(reverse);
+        value.retarget(0., HOVER, true, reverse);
+        let after = value.state(reverse);
+        assert!((before.0 - after.0).abs() < 0.00001);
+        assert!((before.1 - after.1).abs() < 0.00001);
+        for hz in [30, 60, 120, 144] {
+            for frame in 0..hz {
+                let t = reverse + Duration::from_secs_f64(frame as f64 / hz as f64);
+                assert!((0. ..=1.).contains(&value.sample(t)));
+            }
+            assert_eq!(value.sample(reverse + Duration::from_secs(1)), 0.);
+        }
     }
     #[test]
     fn cubic_ease_is_monotonic_and_bounded() {

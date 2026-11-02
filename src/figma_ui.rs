@@ -176,7 +176,7 @@ impl Window {
             }
         }
     }
-    fn figma_transform(&self) -> (f32, f32) {
+    pub(super) fn figma_transform(&self) -> (f32, f32) {
         let width = self.shared.borrow().data.settings.width as f32;
         if self.expanded && self.page >= 3 {
             (1., 0.)
@@ -579,20 +579,35 @@ impl Window {
                 }
                 let hit = (10., visible_top, 40., visible_bottom - visible_top);
                 let hover = c.hover_amount((10., y, 40., 40.), self.figma_hover(hit));
-                c.rect(
-                    10.,
-                    y,
-                    40.,
-                    40.,
+                // Key selection to the page, not its scrolling pixel position.
+                let selection = c.animate_value(
+                    (i as f32, -48., 40., 40.),
+                    2,
+                    f32::from(i == self.page),
+                    motion::STATE,
+                );
+                let press = c.animate_value(
+                    (10., y, 40., 40.),
+                    1,
+                    f32::from(self.pressed && self.figma_hover(hit)),
+                    motion::PRESS,
+                );
+                let dy = if self.shared.borrow().data.settings.motion {
+                    -hover + press * 1.5
+                } else {
+                    0.
+                };
+                c.glass_panel(
+                    (10., y + dy, 40., 40.),
                     13.,
                     motion::mix(
-                        if i == self.page { 0x414141 } else { 0x242424 },
+                        motion::mix(0x242424, 0x414141, selection),
                         0x4a4a4a,
-                        hover,
+                        hover * 0.65,
                     ),
+                    hover,
                 );
-                c.glass_edge(10., y, 40., 40., 13., hover);
-                c.icon(icon, 16., y + 6., 28., 0xffffff);
+                c.icon(icon, 16., y + 6. + dy, 28., 0xffffff);
                 self.figma_hit(hit, Action::Page(i));
             }
             c.pop_design_clip();

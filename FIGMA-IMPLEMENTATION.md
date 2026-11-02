@@ -89,6 +89,16 @@ repaint through the same path so they cannot punch holes in the parent shell.
 The native editor retains its keyboard, clipboard, selection and IME behavior;
 the task and calendar input colours match their opaque parent fields.
 
+Shared interaction channels use analytic critically damped springs. Retargeting
+preserves current value and velocity, and settled channels stop requesting
+frames. Compact/medium geometry retains those springs through pointer reversals.
+Page changes fade and drift the outgoing content in the sidebar direction while
+leaving the sidebar and native hit rectangles stable. Sidebar selection blends
+instead of snapping, and the plate/glyph share their hover/press offset. Glass
+face reflections respond to the local pointer. Click pulses are mapped from
+window to design coordinates for centered/scaled views. Motion-off remains
+instant; the existing single UI frame clock and bounded caches are reused.
+
 The shell contour also masks the Direct2D frame with per-pixel antialiasing.
 DWM receives a premultiplied-alpha surface while the content stays opaque.
 The matching Win32 region has a one-pixel guard so it cannot cut off fractional
