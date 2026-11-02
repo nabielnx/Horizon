@@ -1,0 +1,30 @@
+/target/
+/tools/
+/artifacts/
+/assets/icons_backup/
+.local-build.json
+.cargo/config.toml
+*.log
+
+# Dependencies, editor state and temporary files
+**/node_modules/
+.vs/
+.vscode/
+.idea/
+*.tmp
+*.bak
+Thumbs.db
+.DS_Store
+
+# Credentials and signing material
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Runtime data
+data.json
+lyrics-cache.json

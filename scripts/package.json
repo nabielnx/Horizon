@@ -1,0 +1,8 @@
+{
+  "name": "horizon-development-tools",
+  "private": true,
+  "version": "0.3.0",
+  "description": "Optional SVG conversion for Horizon's committed assets",
+  "scripts": { "prepare-figma": "node prepare-figma-assets.cjs" },
+  "devDependencies": { "@resvg/resvg-js": "2.6.2" }
+}
