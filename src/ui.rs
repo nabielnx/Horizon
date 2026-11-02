@@ -53,7 +53,16 @@ impl Window {
             self.palette.retarget(colors, animate, now);
             c.set_glass_motion(s.motion && !self.settings);
             c.set_interaction_pressed(self.pressed);
-            c.begin_palette(self.palette.sample(now));
+            if !self.settings && self.alpha_shell {
+                if let Err(error) =
+                    c.begin_shell_palette(self.palette.sample(now), shell_outline(self))
+                {
+                    self.canvas = Some(c);
+                    return Err(error);
+                }
+            } else {
+                c.begin_palette(self.palette.sample(now));
+            }
             if self.settings {
                 self.draw_settings(&c, &state);
             } else {

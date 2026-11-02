@@ -68,6 +68,14 @@ struct KaraokeLayout {
     scroll: bool,
     layout: IDWriteTextLayout,
 }
+#[derive(Clone, Copy, PartialEq)]
+pub struct ShellOutline {
+    pub width: f32,
+    pub height: f32,
+    pub shape: f32,
+    pub radius: f32,
+    pub offset: f32,
+}
 pub struct Canvas {
     target: ID2D1RenderTarget,
     write: IDWriteFactory,
@@ -88,11 +96,13 @@ pub struct Canvas {
     stroke: ID2D1StrokeStyle,
     glass_motion: Cell<bool>,
     interaction_pressed: Cell<bool>,
+    shell_mask: RefCell<Option<(ShellOutline, ID2D1Geometry)>>,
+    shell_layer: Cell<bool>,
     #[allow(clippy::type_complexity)]
     glass_states: RefCell<HashMap<(i32, i32, i32, i32, u8), crate::motion::Tween>>,
 }
 impl Canvas {
-    pub unsafe fn new(hwnd: HWND, width: u32, height: u32) -> Result<Self> {
+    pub unsafe fn new(hwnd: HWND, width: u32, height: u32, alpha: bool) -> Result<Self> {
         unsafe {
             let target = factory()?
                 .CreateHwndRenderTarget(
@@ -104,7 +114,11 @@ impl Canvas {
                         },
                         pixelFormat: D2D1_PIXEL_FORMAT {
                             format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                            alphaMode: D2D1_ALPHA_MODE_IGNORE,
+                            alphaMode: if alpha {
+                                D2D1_ALPHA_MODE_PREMULTIPLIED
+                            } else {
+                                D2D1_ALPHA_MODE_IGNORE
+                            },
                         },
                         ..Default::default()
                     },
@@ -174,6 +188,8 @@ impl Canvas {
                 glass_motion: Cell::new(false),
                 glass_states: RefCell::new(HashMap::new()),
                 interaction_pressed: Cell::new(false),
+                shell_mask: RefCell::new(None),
+                shell_layer: Cell::new(false),
                 cover_cache: RefCell::new(None),
                 preview_cache: RefCell::new(None),
                 solid_brush,
@@ -477,16 +493,85 @@ impl Canvas {
             offset
         }
     }
+    pub unsafe fn glass_button(
+        &self,
+        bounds: (f32, f32, f32, f32),
+        radius: f32,
+        hovered: bool,
+    ) -> f32 {
+        unsafe {
+            let light = self.hover_amount(bounds, hovered);
+            let press = self.animate_value(
+                bounds,
+                1,
+                f32::from(hovered && self.interaction_pressed.get()),
+                crate::motion::PRESS,
+            );
+            let dy = if self.glass_motion.get() {
+                -light + press * 2.
+            } else {
+                0.
+            };
+            let (x, y, w, h) = bounds;
+            self.rect(
+                x,
+                y + dy,
+                w,
+                h,
+                radius,
+                crate::motion::mix(0x202022, 0x303033, (light - press * 0.25).max(0.)),
+            );
+            // A face reflection is composited over an opaque base. It does not
+            // expose wallpaper or include another outline around the icon.
+            if let Ok(stops) = self.target.CreateGradientStopCollection(
+                &[
+                    D2D1_GRADIENT_STOP {
+                        position: 0.,
+                        color: color(0x10ffffff),
+                    },
+                    D2D1_GRADIENT_STOP {
+                        position: 0.55,
+                        color: color(0x01ffffff),
+                    },
+                    D2D1_GRADIENT_STOP {
+                        position: 1.,
+                        color: color(0x04ffffff),
+                    },
+                ],
+                D2D1_GAMMA_2_2,
+                D2D1_EXTEND_MODE_CLAMP,
+            ) && let Ok(brush) = self.target.CreateLinearGradientBrush(
+                &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
+                    startPoint: Vector2 { X: x, Y: y + dy },
+                    endPoint: Vector2 {
+                        X: x + w * 0.25,
+                        Y: y + h + dy,
+                    },
+                },
+                None,
+                &stops,
+            ) {
+                self.target.FillRoundedRectangle(
+                    &D2D1_ROUNDED_RECT {
+                        rect: rect(x, y + dy, w, h),
+                        radiusX: radius,
+                        radiusY: radius,
+                    },
+                    &brush,
+                );
+            }
+            self.glass_edge(x, y + dy, w, h, radius, light);
+            dy
+        }
+    }
     pub unsafe fn glass_edge(&self, x: f32, y: f32, w: f32, h: f32, radius: f32, hover: f32) {
         unsafe {
-            // A white hairline supports the thicker top reflection, fading
-            // around the corners to a thin lower edge. No dark bevel or wash.
-            for layer in 0..2 {
-                let alpha = (64. + hover * 16.) as u32;
-                let (stroke, colors) = match layer {
-                    0 => (0.4, [0x30ffffff, 0x14ffffff, 0x28ffffff]),
-                    _ => (1.3, [(alpha << 24) | 0xffffff, 0x0cffffff, 0x01ffffff]),
-                };
+            // One contour, with a stronger upper reflection fading toward the
+            // lower edge. Hover changes light, never the corner geometry.
+            {
+                let alpha = (104. + hover.clamp(0., 1.) * 24.) as u32;
+                let stroke = 1.;
+                let colors = [(alpha << 24) | 0xffffff, 0x18ffffff, 0x28ffffff];
                 let inset = stroke / 2.;
                 let stops = self.target.CreateGradientStopCollection(
                     &[
@@ -601,7 +686,66 @@ impl Canvas {
         unsafe {
             self.target.BeginDraw();
             self.target.Clear(Some(&color(0x17191c)));
-
+            self.fill_palette(colors);
+        }
+    }
+    pub unsafe fn begin_shell_palette(
+        &self,
+        colors: [u32; 3],
+        outline: ShellOutline,
+    ) -> Result<()> {
+        unsafe {
+            let mut cache = self.shell_mask.borrow_mut();
+            if cache.as_ref().is_none_or(|(key, _)| *key != outline) {
+                let geometry = factory()?.CreatePathGeometry()?;
+                let sink = geometry.Open()?;
+                let points = crate::layout::contour(
+                    outline.width,
+                    outline.height,
+                    outline.shape,
+                    outline.radius,
+                );
+                sink.BeginFigure(
+                    Vector2 {
+                        X: points[0].0 + outline.offset,
+                        Y: points[0].1,
+                    },
+                    D2D1_FIGURE_BEGIN_FILLED,
+                );
+                for &(x, y) in &points[1..] {
+                    sink.AddLine(Vector2 {
+                        X: x + outline.offset,
+                        Y: y,
+                    });
+                }
+                sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+                sink.Close()?;
+                *cache = Some((outline, geometry.cast()?));
+            }
+            let mut parameters = D2D1_LAYER_PARAMETERS {
+                contentBounds: rect(0., 0., self.width as f32, self.height as f32),
+                geometricMask: std::mem::ManuallyDrop::new(Some(cache.as_ref().unwrap().1.clone())),
+                maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                maskTransform: Matrix3x2 {
+                    M11: 1.,
+                    M22: 1.,
+                    ..Default::default()
+                },
+                opacity: 1.,
+                ..Default::default()
+            };
+            self.target.BeginDraw();
+            self.target.Clear(Some(&D2D1_COLOR_F::default()));
+            self.target.PushLayer(&parameters, None);
+            std::mem::ManuallyDrop::drop(&mut parameters.geometricMask);
+            self.shell_layer.set(true);
+            self.fill_palette(colors);
+            Ok(())
+        }
+    }
+    unsafe fn fill_palette(&self, colors: [u32; 3]) {
+        unsafe {
+            self.rect(0., 0., self.width as f32, self.height as f32, 0., 0x17191c);
             if let Ok(stops) = self.target.CreateGradientStopCollection(
                 &[
                     D2D1_GRADIENT_STOP {
@@ -1551,6 +1695,9 @@ impl Canvas {
     }
     pub unsafe fn end(&self) -> Result<()> {
         unsafe {
+            if self.shell_layer.replace(false) {
+                self.target.PopLayer();
+            }
             let result = self.target.EndDraw(None, None);
             self.presented.set(result.is_ok());
             result
@@ -3101,6 +3248,313 @@ mod waveform_tests {
             canvas.set_glass_motion(false);
             assert_eq!(canvas.hover_amount((1199., 0., 20., 20.), true), 1.);
             assert!(!canvas.glass_animating());
+        }
+    }
+    #[test]
+    fn shell_mask_preserves_fractional_corner_coverage_and_opaque_content() {
+        unsafe {
+            let canvas = Canvas::image(680, 280).unwrap();
+            for (width, height, shape, radius) in [
+                (310., 50., 0., 37.),
+                (591., 101., 1., 37.),
+                (680., 280., 1., 32.),
+                (631.25, 177.75, 0.73, 34.5),
+            ] {
+                let outline = ShellOutline {
+                    width,
+                    height,
+                    shape,
+                    radius,
+                    offset: (680. - width) / 2.,
+                };
+                canvas.begin_shell_palette([0x203040; 3], outline).unwrap();
+                // Child content cannot paint outside the shell mask.
+                canvas.rect(0., 0., 680., 280., 0., 0x203040);
+                canvas.end().unwrap();
+                let mut pixels = vec![0; 680 * 280 * 4];
+                canvas
+                    .bitmap
+                    .as_ref()
+                    .unwrap()
+                    .CopyPixels(std::ptr::null(), 680 * 4, &mut pixels)
+                    .unwrap();
+                let alpha = |x: usize, y: usize| pixels[(y * 680 + x) * 4 + 3];
+                assert_eq!(alpha(340, 20), 255, "opaque center");
+                assert_eq!(
+                    alpha(outline.offset as usize, height as usize - 1),
+                    0,
+                    "transparent corner"
+                );
+                let mut partial = 0;
+                let mut left_coverage = 0_i64;
+                let mut right_coverage = 0_i64;
+                for y in (height as usize - 25)..height.ceil() as usize {
+                    for x in outline.offset as usize..(outline.offset + 70.) as usize {
+                        let a = alpha(x, y);
+                        if a > 0 && a < 255 {
+                            partial += 1;
+                        }
+                        left_coverage += i64::from(a);
+                        right_coverage += i64::from(alpha(679 - x, y));
+                    }
+                }
+                assert!(
+                    partial >= 12,
+                    "rounded corner needs partial pixel coverage: {partial}"
+                );
+                // Software D2D quantizes coverage per edge direction; compare
+                // the total mirrored area within two pixels, not identical ink.
+                assert!(
+                    (left_coverage - right_coverage).abs() <= 510,
+                    "asymmetric corner area: {left_coverage} vs {right_coverage}"
+                );
+                assert!(!canvas.shell_layer.get());
+            }
+        }
+    }
+    #[test]
+    #[ignore = "Creates two small temporary windows to sample DWM composition; run explicitly on an unlocked desktop"]
+    fn desktop_compositor_preserves_shell_alpha() {
+        unsafe extern "system" fn wndproc(
+            hwnd: HWND,
+            msg: u32,
+            wp: windows::Win32::Foundation::WPARAM,
+            lp: windows::Win32::Foundation::LPARAM,
+        ) -> windows::Win32::Foundation::LRESULT {
+            unsafe { windows::Win32::UI::WindowsAndMessaging::DefWindowProcW(hwnd, msg, wp, lp) }
+        }
+        use windows::Win32::{
+            Graphics::{Dwm::*, Gdi::*},
+            System::LibraryLoader::GetModuleHandleW,
+            UI::{Controls::MARGINS, WindowsAndMessaging::*},
+        };
+        unsafe {
+            let instance = GetModuleHandleW(None).unwrap();
+            let background_brush = CreateSolidBrush(windows::Win32::Foundation::COLORREF(0xff00ff));
+            let class = w!("Horizon.AlphaProbe");
+            RegisterClassW(&WNDCLASSW {
+                lpfnWndProc: Some(wndproc),
+                hInstance: instance.into(),
+                hbrBackground: background_brush,
+                lpszClassName: class,
+                ..Default::default()
+            });
+            let mut work = windows::Win32::Foundation::RECT::default();
+            SystemParametersInfoW(
+                SPI_GETWORKAREA,
+                0,
+                Some((&mut work as *mut windows::Win32::Foundation::RECT).cast()),
+                SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+            )
+            .unwrap();
+            let (x, y) = (work.left + 16, work.bottom - 116);
+            let back = CreateWindowExW(
+                WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+                class,
+                w!("Horizon alpha test background"),
+                WS_POPUP,
+                x,
+                y,
+                100,
+                100,
+                None,
+                None,
+                Some(instance.into()),
+                None,
+            )
+            .unwrap();
+            let front = CreateWindowExW(
+                WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED,
+                class,
+                w!("Horizon alpha test surface"),
+                WS_POPUP | WS_CLIPCHILDREN,
+                x + 10,
+                y + 10,
+                80,
+                80,
+                None,
+                None,
+                Some(instance.into()),
+                None,
+            )
+            .unwrap();
+            SetLayeredWindowAttributes(
+                front,
+                windows::Win32::Foundation::COLORREF(0),
+                255,
+                LWA_ALPHA,
+            )
+            .unwrap();
+            DwmExtendFrameIntoClientArea(
+                front,
+                &MARGINS {
+                    cxLeftWidth: -1,
+                    cxRightWidth: -1,
+                    cyTopHeight: -1,
+                    cyBottomHeight: -1,
+                },
+            )
+            .unwrap();
+            let guard = crate::layout::contour(82., 81., 1., 21.)
+                .into_iter()
+                .map(|(x, y)| windows::Win32::Foundation::POINT {
+                    x: (x - 1.).round() as i32,
+                    y: y.round() as i32,
+                })
+                .collect::<Vec<_>>();
+            let region = CreatePolygonRgn(&guard, WINDING);
+            assert_ne!(SetWindowRgn(front, Some(region), false), 0);
+            let edit = CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("EDIT"),
+                w!(""),
+                WS_CHILD | WS_VISIBLE,
+                30,
+                30,
+                20,
+                20,
+                Some(front),
+                None,
+                Some(instance.into()),
+                None,
+            )
+            .unwrap();
+            let canvas = Canvas::new(front, 80, 80, true).unwrap();
+            canvas
+                .begin_shell_palette(
+                    [0x203040; 3],
+                    ShellOutline {
+                        width: 80.,
+                        height: 80.,
+                        shape: 1.,
+                        radius: 20.,
+                        offset: 0.,
+                    },
+                )
+                .unwrap();
+            canvas.end().unwrap();
+            let _ = ShowWindow(back, SW_SHOWNOACTIVATE);
+            let _ = UpdateWindow(back);
+            let _ = ShowWindow(front, SW_SHOWNOACTIVATE);
+            let _ = UpdateWindow(edit);
+            // Present after show, matching the retained HWND target's lifecycle.
+            canvas
+                .begin_shell_palette(
+                    [0x203040; 3],
+                    ShellOutline {
+                        width: 80.,
+                        height: 80.,
+                        shape: 1.,
+                        radius: 20.,
+                        offset: 0.,
+                    },
+                )
+                .unwrap();
+            canvas.end().unwrap();
+            DwmFlush().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            let dc = GetDC(None);
+            let corner = GetPixel(dc, x + 11, y + 88).0;
+            let center = GetPixel(dc, x + 50, y + 30).0;
+            let child = GetPixel(dc, x + 50, y + 50).0;
+            let mut partial = 0;
+            for py in 60..80 {
+                for px in 0..25 {
+                    let pixel = GetPixel(dc, x + 10 + px, y + 10 + py).0;
+                    if pixel != 0xff00ff && pixel != 0x403020 && pixel != 0xffffffff {
+                        partial += 1;
+                    }
+                }
+            }
+            let _ = ReleaseDC(None, dc);
+            drop(canvas);
+            DestroyWindow(front).unwrap();
+            DestroyWindow(back).unwrap();
+            UnregisterClassW(class, Some(instance.into())).unwrap();
+            let _ = DeleteObject(background_brush.into());
+            assert_eq!(
+                corner, 0xff00ff,
+                "DWM must reveal the probe background at the transparent corner; center={center:06x}"
+            );
+            assert_eq!(center, 0x403020, "shell interior must remain opaque");
+            assert_eq!(child, 0xffffff, "native child edit must remain opaque");
+            assert!(
+                partial >= 12,
+                "DWM must preserve fractional edge pixels through the guarded Win32 region: {partial}"
+            );
+        }
+    }
+    #[test]
+    fn music_glass_is_opaque_and_its_reflection_survives_without_hover() {
+        unsafe {
+            let mut faces = Vec::new();
+            for backdrop in [0x990000, 0x000099] {
+                let canvas = Canvas::image(64, 64).unwrap();
+                canvas.begin_palette([backdrop; 3]);
+                assert_eq!(canvas.glass_button((7., 7., 50., 50.), 17., false), 0.);
+                canvas.end().unwrap();
+                let mut pixels = vec![0; 64 * 64 * 4];
+                canvas
+                    .bitmap
+                    .as_ref()
+                    .unwrap()
+                    .CopyPixels(std::ptr::null(), 64 * 4, &mut pixels)
+                    .unwrap();
+                let pixel =
+                    |x: usize, y: usize| pixels[(y * 64 + x) * 4..(y * 64 + x) * 4 + 4].to_vec();
+                assert_eq!(pixel(32, 32)[3], 255);
+                assert!(
+                    pixel(32, 7)[0] > pixel(32, 32)[0] + 20,
+                    "visible upper rim while idle"
+                );
+                assert!(
+                    pixel(32, 13)[0] > pixel(32, 40)[0],
+                    "face reflection fades downwards"
+                );
+                faces.push(pixel(32, 32));
+            }
+            assert_eq!(
+                faces[0], faces[1],
+                "wallpaper must not tint the solid button face"
+            );
+            for (name, bytes) in [
+                (
+                    "media-pause",
+                    include_bytes!("../assets/figma/media-pause-glyph.png").as_slice(),
+                ),
+                (
+                    "media-lyrics",
+                    include_bytes!("../assets/figma/media-lyrics-glyph.png").as_slice(),
+                ),
+                (
+                    "peek-pause",
+                    include_bytes!("../assets/figma/peek-pause-glyph.png").as_slice(),
+                ),
+            ] {
+                let canvas = Canvas::image(50, 50).unwrap();
+                canvas.target.BeginDraw();
+                canvas.target.Clear(Some(&D2D1_COLOR_F::default()));
+                canvas
+                    .design_asset(name, bytes, (0., 0., 50., 50.))
+                    .unwrap();
+                canvas.end().unwrap();
+                let mut pixels = vec![0; 50 * 50 * 4];
+                canvas
+                    .bitmap
+                    .as_ref()
+                    .unwrap()
+                    .CopyPixels(std::ptr::null(), 50 * 4, &mut pixels)
+                    .unwrap();
+                assert_eq!(
+                    pixels[(25 * 50 + 4) * 4 + 3],
+                    0,
+                    "{name} still contains a baked-in plate"
+                );
+                assert!(
+                    pixels.as_chunks::<4>().0.iter().any(|p| p[3] > 240),
+                    "glyph must remain visible"
+                );
+            }
         }
     }
     #[test]

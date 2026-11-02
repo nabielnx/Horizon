@@ -103,6 +103,14 @@ ignored by default. Offscreen tests do not prove compositor smoothness, actual
 media-provider behavior, audio hardware support or startup after reboot.
 
 `-CaptureLayouts` explicitly creates debugging images; it is not needed for CI.
+
+The opt-in `desktop_compositor_preserves_shell_alpha` unit test creates two
+small temporary windows on an unlocked desktop and samples their composed
+pixels. Run it explicitly with `cargo test desktop_compositor -- --ignored`.
+It checks fractional shell edges through the Win32 region, opaque content and
+a native edit control; it saves no screenshots. It is ignored in unattended CI,
+along with the separate opt-in network test.
+
 `check-palette.ps1` is an older pixel baseline that may need revision for newer
 designs. Its legacy palette assertions are not current design acceptance.
 Keep diagnostic output local and use synthetic data in reports.

@@ -22,6 +22,7 @@ pub(super) unsafe fn prepare_first_frame(hwnd: HWND, w: &mut Window) -> Result<(
             hwnd,
             bounds.right as u32,
             bounds.bottom as u32,
+            w.alpha_shell,
         )?);
         w.paint()?;
         if !w.canvas.as_ref().is_some_and(Canvas::has_frame) {

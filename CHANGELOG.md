@@ -2,6 +2,12 @@
 
 ## 0.3.0 — Unreleased
 
+- Music transport buttons share one opaque glass surface with a fading white
+  reflection, including play/pause in medium mode. Glyph-only assets prevent
+  baked-in fills and mismatched hover outlines from stacking.
+- Shell corners use an antialiased alpha mask through DWM, with a guarded
+  Win32 region, preserving the existing dimensions and native input controls.
+
 - Played music rails use the front waveform colour in compact, medium and
   expanded views; the remaining rail uses a dim shade of the same cover tint.
 

@@ -162,6 +162,7 @@ struct Shared {
 struct Window {
     shared: Rc<RefCell<Shared>>,
     canvas: Option<Canvas>,
+    alpha_shell: bool,
     settings: bool,
     expanded: bool,
     hovered: bool,
@@ -399,12 +400,9 @@ unsafe fn apply_frame(hwnd: HWND, w: &mut Window) {
     }
     let _ = InvalidateRect(Some(hwnd), None, false);
 }
-pub(crate) unsafe fn region(hwnd: HWND, w: &Window) {
+fn shell_outline(w: &Window) -> render::ShellOutline {
     let s = &w.shared.borrow().data.settings;
     let p = w.expansion;
-    if w.mode == shell_policy::Mode::Hidden && p <= 0.0001 {
-        return;
-    }
     let full_w = s.width as f32;
     let full_h = if w.page <= 2 {
         host_height()
@@ -420,13 +418,34 @@ pub(crate) unsafe fn region(hwnd: HWND, w: &Window) {
     // Compact's exported shoulder is 9px; peek has straight sides. Expansion
     // alone cannot distinguish those two contours, so include the peek phase.
     let shape = idle.shape + (1. - idle.shape) * p;
-    let raw_points: Vec<POINT> = layout::contour(width, height, shape, radius)
-        .into_iter()
-        .map(|(x, y)| POINT {
-            x: (x + offset).round() as i32,
-            y: y.round() as i32,
-        })
-        .collect();
+    render::ShellOutline {
+        width,
+        height,
+        shape,
+        radius,
+        offset,
+    }
+}
+pub(crate) unsafe fn region(hwnd: HWND, w: &Window) {
+    if w.mode == shell_policy::Mode::Hidden && w.expansion <= 0.0001 {
+        return;
+    }
+    let outline = shell_outline(w);
+    // Win32 regions only contain whole pixels. Leave a one-pixel guard around
+    // the antialiased mask instead of cutting away its fractional coverage.
+    let guard = if w.alpha_shell { 1. } else { 0. };
+    let raw_points: Vec<POINT> = layout::contour(
+        outline.width + guard * 2.,
+        outline.height + guard,
+        outline.shape,
+        outline.radius + guard,
+    )
+    .into_iter()
+    .map(|(x, y)| POINT {
+        x: (x + outline.offset - guard).round() as i32,
+        y: y.round() as i32,
+    })
+    .collect();
     let mut points: Vec<POINT> = Vec::with_capacity(raw_points.len());
     for pt in raw_points {
         if points
@@ -1306,7 +1325,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                         (s.width, host_height())
                     }
                 };
-                w.canvas = Canvas::new(hwnd, size.0 as u32, size.1 as u32).ok();
+                w.canvas = Canvas::new(hwnd, size.0 as u32, size.1 as u32, w.alpha_shell).ok();
             }
             if w.paint().is_err() {
                 w.canvas = None;
@@ -1864,6 +1883,7 @@ unsafe fn create(shared: Rc<RefCell<Shared>>, settings: bool, offscreen: bool) -
     let w = Box::new(Window {
         shared,
         canvas: None,
+        alpha_shell: false,
         settings,
         expanded: false,
         hovered: false,
@@ -1959,7 +1979,21 @@ unsafe fn create(shared: Rc<RefCell<Shared>>, settings: bool, offscreen: bool) -
             .store(hwnd.0 as usize, std::sync::atomic::Ordering::Relaxed);
     }
     if !settings {
+        use windows::Win32::Graphics::Dwm::DwmExtendFrameIntoClientArea;
         use windows::Win32::Graphics::Dwm::{DWMWA_BORDER_COLOR, DwmSetWindowAttribute};
+        use windows::Win32::UI::Controls::MARGINS;
+        // Let DWM composite fractional edge coverage from the premultiplied
+        // Direct2D surface. The interior remains opaque, including native edits.
+        w.alpha_shell = DwmExtendFrameIntoClientArea(
+            hwnd,
+            &MARGINS {
+                cxLeftWidth: -1,
+                cxRightWidth: -1,
+                cyTopHeight: -1,
+                cyBottomHeight: -1,
+            },
+        )
+        .is_ok();
         // Windows 11: disable the system border before the first show. Older
         // Windows versions retain the non-client message handling above.
         let no_border = COLORREF(0xfffffffe);
@@ -2295,6 +2329,7 @@ fn run() -> Result<()> {
                 root,
                 (*raw).shared.borrow().data.settings.width as u32,
                 host_height() as u32,
+                (*raw).alpha_shell,
             )?);
             (*raw).paint()?;
             if std::env::args().any(|a| a == "--settings") {
@@ -2303,7 +2338,7 @@ fn run() -> Result<()> {
                 for p in 0..7 {
                     (*raw).page = p;
                     if (*raw).canvas.is_none() {
-                        (*raw).canvas = Some(Canvas::new(dialog, 710, 550)?);
+                        (*raw).canvas = Some(Canvas::new(dialog, 710, 550, false)?);
                     }
                     (*raw).paint()?;
                 }

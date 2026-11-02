@@ -56,4 +56,17 @@ Cover palettes sample a bounded 32 × 32 thumbnail and prefer meaningful chromat
 
 Poppins Regular, SemiBold, Bold and ExtraLight are bundled; native edit controls and legacy pages retain Plus Jakarta Sans. SF Pro is not bundled. Original Figma exports remain in `assets/figma`; PNGs are build-time raster conversions. Static images are cached at their actual dimensions. Runtime code has no temporary Figma URLs, WebView or JavaScript dependency. Media, lyrics and cover imagery remain data driven.
 
+Music transport plates and medium play/pause share a native opaque neutral
+glass surface. A face reflection and one fading white rim sit underneath the
+white glyph. Hover and press move the complete surface and glyph together;
+they do not introduce another corner radius. The `*-glyph.svg`/PNG derivatives
+remove the exported background rectangle; original exports remain unchanged.
+
+The shell contour also masks the Direct2D frame with per-pixel antialiasing.
+DWM receives a premultiplied-alpha surface while the content stays opaque.
+The matching Win32 region has a one-pixel guard so it cannot cut off fractional
+edge coverage. One current geometry is cached across unchanged frames; no new
+rendering thread or graphics device is added. If DWM frame extension fails,
+the existing opaque target and integer region remain the fallback.
+
 Validation uses Clippy, unit tests, and native offscreen fixtures at 360/480/540/560/591/680 px. Renderer tests verify that coloured wave pixels never precede the playhead near track start. Native fixtures cover playing → paused dashboard → resumed music, stable transport hits, sidebar access and all agenda pages. `-CaptureLayouts` temporarily exports `layout-20261102-*`, `polish-591-page-*` and `polish-680-page-*`; delete only those owned debug captures after inspection. Keep runtime assets in `assets/figma`.

@@ -133,12 +133,12 @@ unsafe fn asset(c: &Canvas, name: &'static str, b: (f32, f32, f32, f32)) {
         "nav-tasks" => include_bytes!("../assets/figma/nav-tasks.png"),
         "nav-files" => include_bytes!("../assets/figma/nav-files.png"),
         "nav-settings" => include_bytes!("../assets/figma/nav-settings.png"),
-        "media-lyrics" => include_bytes!("../assets/figma/media-lyrics.png"),
+        "media-lyrics" => include_bytes!("../assets/figma/media-lyrics-glyph.png"),
         "media-previous" => include_bytes!("../assets/figma/media-previous.png"),
-        "media-pause" => include_bytes!("../assets/figma/media-pause.png"),
+        "media-pause" => include_bytes!("../assets/figma/media-pause-glyph.png"),
         "media-next" => include_bytes!("../assets/figma/media-next.png"),
         "media-heart" => include_bytes!("../assets/figma/media-heart.png"),
-        "peek-pause" => include_bytes!("../assets/figma/peek-pause.png"),
+        "peek-pause" => include_bytes!("../assets/figma/peek-pause-glyph.png"),
         "spotify" => include_bytes!("../assets/figma/spotify.png"),
         "repeat" => include_bytes!("../assets/figma/repeat.png"),
         "fire" => include_bytes!("../assets/figma/fire.png"),
@@ -255,37 +255,12 @@ impl Window {
         unsafe {
             let b = (518., 29., 40., 39.);
             let hover = self.figma_hover(b);
-            let light = c.hover_amount(b, hover);
-            let press = c.animate_value(b, 1, f32::from(hover && self.pressed), motion::PRESS);
-            let dy = if self.shared.borrow().data.settings.motion {
-                -light + press * 2.
-            } else {
-                0.
-            };
-            c.rect(
-                b.0,
-                b.1 + dy,
-                b.2,
-                b.3,
-                11.,
-                if track.playing {
-                    motion::mix(0x131313, 0x202020, light)
-                } else {
-                    motion::mix(0x2b2b2b, 0x373737, light)
-                },
-            );
+            let dy = c.glass_button(b, 11., hover);
             if track.playing {
                 asset(c, "peek-pause", (b.0, b.1 + dy, b.2, b.3));
             } else {
                 c.icon("play", b.0 + 8., b.1 + 7.5 + dy, 24., 0xffffff);
             }
-            c.glass_edge(b.0, b.1 + dy, b.2, b.3, 11., light);
-            c.line(
-                (b.0 + 12., b.1 + 0.7 + dy),
-                (b.0 + 28., b.1 + 0.7 + dy),
-                0.7,
-                0x65ffffff,
-            );
             self.figma_hit(b, Action::Media(0));
         }
     }
@@ -316,27 +291,7 @@ impl Window {
     ) -> f32 {
         unsafe {
             let hover = self.figma_hover(b);
-            let t = c.hover_amount(b, hover);
-            let press = c.animate_value(b, 1, f32::from(hover && self.pressed), motion::PRESS);
-            let dy = if self.shared.borrow().data.settings.motion {
-                -t + 2. * press
-            } else {
-                0.
-            };
-            let transport = b.1 == 154. && (b.0 == 251. || b.0 == 343.);
-            c.rect(
-                b.0,
-                b.1 + dy,
-                b.2,
-                b.3,
-                radius,
-                if transport {
-                    0x33000000 | motion::mix(0xff7373, 0xffaaaa, t)
-                } else {
-                    motion::mix(0x191919, 0x303030, t)
-                },
-            );
-            c.glass_edge(b.0, b.1 + dy, b.2, b.3, radius, t);
+            let dy = c.glass_button(b, radius, hover);
             self.figma_hit(b, action);
             dy
         }
@@ -349,6 +304,17 @@ impl Window {
         action: Action,
     ) {
         unsafe {
+            // Every transport shares one opaque surface. Raster assets contain
+            // glyphs only, so hover never stacks a second baked-in plate/rim.
+            if name.starts_with("media-") {
+                let dy = self.figma_plate(c, b, 17., action);
+                if name == "media-heart" {
+                    c.icon_filled("heart", b.0 + 12., b.1 + 12. + dy, 26., 0xffffff);
+                } else {
+                    asset(c, name, (b.0, b.1 + dy, b.2, b.3));
+                }
+                return;
+            }
             let hit = if b.2 <= 18. && b.3 <= 18. {
                 (b.0 - (24. - b.2) / 2., b.1 - (24. - b.3) / 2., 24., 24.)
             } else {
@@ -362,10 +328,6 @@ impl Window {
             } else {
                 0.
             };
-            if matches!(name, "media-next" | "media-previous") {
-                c.rect(b.0, b.1 + dy, b.2, b.3, 17., 0x1affffff);
-                c.glass_edge(b.0, b.1 + dy, b.2, b.3, 17., light);
-            }
             if matches!(name, "calendar-back" | "calendar-next") {
                 c.icon(
                     if name == "calendar-back" {
@@ -378,10 +340,6 @@ impl Window {
                     20.,
                     0xffffff,
                 );
-            } else if name == "media-heart" {
-                c.rect(b.0, b.1 + dy, b.2, b.3, 17., 0x242424);
-                c.glass_edge(b.0, b.1 + dy, b.2, b.3, 17., light);
-                c.icon_filled("heart", b.0 + 12., b.1 + 12. + dy, 26., 0xffffff);
             } else {
                 asset(c, name, (b.0, b.1 + dy, b.2, b.3));
             }
