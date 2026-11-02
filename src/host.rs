@@ -76,6 +76,11 @@ pub(super) unsafe fn animate(_hwnd: HWND, w: &mut Window) {
 }
 pub(super) fn frame_interval(w: &Window) -> Option<Duration> {
     let state = w.shared.borrow();
+    if w.settings {
+        return (state.data.settings.motion
+            && (w.overlay.is_some() || w.canvas.as_ref().is_some_and(Canvas::glass_animating)))
+        .then_some(motion::FRAME);
+    }
     let now = Instant::now();
     let target = if w.expanded { 1. } else { 0. };
     let target_peek = if w.expanded || w.mode == shell_policy::Mode::Peek {
@@ -123,6 +128,19 @@ pub(super) fn frame_interval(w: &Window) -> Option<Duration> {
     }
 }
 pub(super) unsafe fn frame_step(hwnd: HWND, w: &mut Window) {
+    if w.settings {
+        if w.overlay.as_ref().is_some_and(|overlay| {
+            !w.shared.borrow().data.settings.motion
+                || overlay.started.elapsed().as_secs_f32() >= overlay.duration
+        }) {
+            w.overlay = None;
+        }
+        unsafe {
+            let _ = InvalidateRect(Some(hwnd), None, false);
+            let _ = UpdateWindow(hwnd);
+        }
+        return;
+    }
     let now = Instant::now();
     let dt = w.frame_tick.elapsed().as_secs_f32().min(0.05);
     w.frame_tick = now;

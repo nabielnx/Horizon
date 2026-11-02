@@ -99,6 +99,16 @@ face reflections respond to the local pointer. Click pulses are mapped from
 window to design coordinates for centered/scaled views. Motion-off remains
 instant; the existing single UI frame clock and bounded caches are reused.
 
+Settings uses a 710 x 550 client with a 190 px category sidebar, 474 px content
+cards and a persistent save-status footer. All seven pages use white vector
+icons, shared opaque glass, aligned inline values/steppers and animated switches.
+The main UI frame clock also services the Settings window when its interaction
+or page transition is active, without a separate animation timer. Radius controls
+map the stored legacy value onto the actual expanded contour (default 32 px).
+Opacity is labelled for Air and Berkas, which retain their configurable shell
+opacity. Native verification checks all 17 settings, their saved round trip,
+action bounds and Settings hover frame scheduling.
+
 The shell contour also masks the Direct2D frame with per-pixel antialiasing.
 DWM receives a premultiplied-alpha surface while the content stays opaque.
 The matching Win32 region has a one-pixel guard so it cannot cut off fractional

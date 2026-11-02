@@ -696,9 +696,16 @@ impl Canvas {
     pub fn has_frame(&self) -> bool {
         self.presented.get()
     }
-    pub unsafe fn overlay(&self, bitmap: &ID2D1Bitmap, opacity: f32, shell: bool, drift: f32) {
+    pub unsafe fn overlay(
+        &self,
+        bitmap: &ID2D1Bitmap,
+        opacity: f32,
+        shell: bool,
+        drift: f32,
+        content_left: f32,
+    ) {
         unsafe {
-            let x = if shell { 0. } else { 62. };
+            let x = if shell { 0. } else { content_left };
             let y = if shell { 0. } else { 14. };
             let bounds = rect(x, y, self.width as f32 - x, self.height as f32 - y);
             self.target
@@ -3004,18 +3011,6 @@ impl Canvas {
                     D2D1_DRAW_TEXT_OPTIONS_CLIP,
                     DWRITE_MEASURING_MODE_NATURAL,
                 );
-            }
-        }
-    }
-    pub unsafe fn toggle(&self, x: f32, y: f32, on: bool) {
-        unsafe {
-            if on {
-                self.rect(x, y, 42., 24., 12., 0xffffff);
-                self.rect(x + 21., y + 3., 18., 18., 9., 0x0b0c0e);
-            } else {
-                self.rect(x, y, 42., 24., 12., 0x1c1f24);
-                self.outline(x, y, 42., 24., 12., 0x2e333b);
-                self.rect(x + 3., y + 3., 18., 18., 9., 0x6e7681);
             }
         }
     }

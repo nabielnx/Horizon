@@ -2,6 +2,11 @@
 
 ## 0.3.0 — Unreleased
 
+- Rebuild all seven Settings pages with consistent white icons, neutral glass
+  cards, aligned value controls, animated switches and an automatic-save footer.
+  Settings interactions now share the UI animation clock. Radius changes affect
+  the actual shell and preview, and opacity labels identify the affected pages.
+
 - Use velocity-preserving spring motion for shared hover, press, selection and
   progress channels, including reversible compact/medium shell transitions.
 - Add directional page transitions, animated sidebar selection/press and

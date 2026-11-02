@@ -20,6 +20,7 @@ mod probes;
 mod reminders;
 mod render;
 mod settings_icons;
+mod settings_ui;
 mod shelf;
 mod shelf_ui;
 mod shell_policy;
@@ -281,6 +282,9 @@ fn parse_task(input: &str) -> (String, Option<i64>) {
 }
 const EXPANDED_HEIGHT: i32 = 280;
 const EXPANDED_RADIUS: f32 = 32.;
+fn expanded_radius(settings: &Settings) -> f32 {
+    (EXPANDED_RADIUS + (settings.radius - 21) as f32).clamp(14., 48.)
+}
 const AGENDA_PAGE_SIZE: usize = 2;
 fn panel_height(_s: &Settings) -> i32 {
     EXPANDED_HEIGHT
@@ -412,7 +416,7 @@ fn shell_outline(w: &Window) -> render::ShellOutline {
     } else {
         panel_height(s)
     } as f32;
-    let radius = 37. * (1. - p) + EXPANDED_RADIUS * p;
+    let radius = 37. * (1. - p) + expanded_radius(s) * p;
 
     let idle = w.idle_geometry();
     let width = idle.width + (full_w - idle.width) * p;
@@ -767,7 +771,7 @@ unsafe fn action(hwnd: HWND, w: &mut Window, a: Action) {
             let _ = PostMessageW(None, WM_QUIT, WPARAM(0), LPARAM(0));
         }
         Action::Page(p) => {
-            if !w.settings && w.page != p {
+            if w.page != p {
                 begin_transition(w, false, motion::PAGE);
                 if let Some(overlay) = &mut w.overlay {
                     overlay.direction = if p > w.page { -1. } else { 1. };
@@ -2396,11 +2400,26 @@ fn run() -> Result<()> {
                 settings.canvas = Some(Canvas::image(710, 550)?);
                 settings.paint()?;
                 for h in &settings.hits {
+                    if h.x < 0 || h.y < 0 || h.x + h.w > 710 || h.y + h.h > 495 {
+                        return Err(Error::new(
+                            E_FAIL,
+                            "Settings action is outside its content area",
+                        ));
+                    }
                     if let Action::Setting(key, _) = h.action {
                         wired.insert(key);
                     }
                 }
             }
+            settings.pointer = (30, 110);
+            settings.paint()?;
+            if frame_interval(settings).is_none() {
+                return Err(Error::new(
+                    E_FAIL,
+                    "Settings hover did not schedule animation frames",
+                ));
+            }
+            settings.pointer = (-1, -1);
             if wired != (0..17).collect() {
                 return Err(Error::new(E_FAIL, "Some settings controls are missing"));
             }
@@ -2478,7 +2497,22 @@ fn run() -> Result<()> {
                 state.last_policy_check = Instant::now();
                 update_policy(root, state);
             }
-            if let Some(interval) = frame_interval(state) {
+            let settings_hwnd = state.shared.borrow().settings_window;
+            let settings_ptr =
+                if !settings_hwnd.is_invalid() && IsWindow(Some(settings_hwnd)).as_bool() {
+                    GetWindowLongPtrW(settings_hwnd, GWLP_USERDATA) as *mut Window
+                } else {
+                    std::ptr::null_mut()
+                };
+            let settings_interval = if settings_ptr.is_null() {
+                None
+            } else {
+                frame_interval(&*settings_ptr)
+            };
+            if let Some(interval) = match (frame_interval(state), settings_interval) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            } {
                 if armed.is_none() {
                     state.frame_tick = Instant::now();
                     let deadline = Instant::now() + interval;
@@ -2497,6 +2531,12 @@ fn run() -> Result<()> {
                 if result == WAIT_OBJECT_0 {
                     let previous = armed.take().unwrap_or_else(Instant::now);
                     frame_step(root, state);
+                    if settings_interval.is_some() && IsWindow(Some(settings_hwnd)).as_bool() {
+                        let live = GetWindowLongPtrW(settings_hwnd, GWLP_USERDATA) as *mut Window;
+                        if !live.is_null() {
+                            frame_step(settings_hwnd, &mut *live);
+                        }
+                    }
                     if let Some(probe) = &mut motion_probe
                         && probe.frame(root, state)?
                     {
