@@ -2101,6 +2101,14 @@ unsafe extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
     if let Ok(parent) = GetParent(hwnd) {
         let ptr = GetWindowLongPtrW(parent, GWLP_USERDATA) as *mut Window;
         if !ptr.is_null() {
+            if (*ptr).alpha_shell {
+                if msg == WM_ERASEBKGND {
+                    return LRESULT(1);
+                }
+                if msg == WM_PAINT && input::paint_opaque(hwnd, (*ptr).input_proc) {
+                    return LRESULT(0);
+                }
+            }
             if msg == WM_LBUTTONDOWN && (*ptr).page == 4 {
                 (*ptr).priority_open = false;
                 let _ = InvalidateRect(Some(parent), None, false);
@@ -2133,7 +2141,11 @@ unsafe extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
                 let _ = PostMessageW(Some(parent), WM_APP + 7, WPARAM(0), LPARAM(0));
                 return LRESULT(0);
             }
-            return CallWindowProcW((*ptr).input_proc, hwnd, msg, wp, lp);
+            let result = CallWindowProcW((*ptr).input_proc, hwnd, msg, wp, lp);
+            if (*ptr).alpha_shell {
+                input::refresh_opaque(hwnd, msg);
+            }
+            return result;
         }
     }
     DefWindowProcW(hwnd, msg, wp, lp)
@@ -2178,6 +2190,7 @@ fn run() -> Result<()> {
     if std::env::args().any(|a| a == "--media-probe") {
         return probes::media_diagnostics();
     }
+    let _buffered_paint = input::BufferedPainting::new()?;
     let _instance = if !std::env::args().any(|a| a == "--offscreen") {
         unsafe {
             let handle = windows::Win32::System::Threading::CreateMutexW(

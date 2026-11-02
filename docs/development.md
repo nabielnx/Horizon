@@ -108,7 +108,11 @@ The opt-in `desktop_compositor_preserves_shell_alpha` unit test creates two
 small temporary windows on an unlocked desktop and samples their composed
 pixels. Run it explicitly with `cargo test desktop_compositor -- --ignored`.
 It checks fractional shell edges through the Win32 region, opaque content and
-a native edit control; it saves no screenshots. It is ignored in unattended CI,
+a dark native edit control before/after typing, selection replacement and a
+calendar colour change; it saves no screenshots. A stock white EDIT does not
+reproduce the alpha regression. Native GDI edits use
+[buffered painting with opaque alpha](https://learn.microsoft.com/en-us/windows/win32/api/uxtheme/nf-uxtheme-bufferedpaintsetalpha)
+on the extended frame. The visible probe is ignored in unattended CI,
 along with the separate opt-in network test.
 
 `check-palette.ps1` is an older pixel baseline that may need revision for newer

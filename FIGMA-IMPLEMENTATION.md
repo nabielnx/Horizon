@@ -76,6 +76,19 @@ not reset the glow. Three brushes are reused until the palette changes, and
 overlapping brightness is bounded to preserve white lyric contrast. No new
 timer, rendering thread, image or runtime dependency is introduced.
 
+The medium dashboard clock uses a silver reflection gradient and a shallow
+glyph bevel, without a background glow. Task rows, empty lists, input and
+priority/add controls use neutral dark glass. The progress card alone keeps
+the green surface (`#286B3B`); white/light type and the existing `#57FA65`
+completion/check accents stay distinct from its fill. Single contour rims and
+face reflections replace stacked outlines.
+
+Native EDIT controls paint through a small buffered GDI surface whose alpha
+is made fully opaque before composition. Typing, replacement and selection
+repaint through the same path so they cannot punch holes in the parent shell.
+The native editor retains its keyboard, clipboard, selection and IME behavior;
+the task and calendar input colours match their opaque parent fields.
+
 The shell contour also masks the Direct2D frame with per-pixel antialiasing.
 DWM receives a premultiplied-alpha surface while the content stays opaque.
 The matching Win32 region has a one-pixel guard so it cannot cut off fractional

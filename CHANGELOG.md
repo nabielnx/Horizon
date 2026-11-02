@@ -2,6 +2,12 @@
 
 ## 0.3.0 — Unreleased
 
+- Repair transparent dark native inputs on the alpha shell with buffered opaque
+  EDIT painting, including typing, replacement, selection and calendar fields.
+- Use reflective silver glyphs for the medium dashboard clock. Task lists,
+  input and controls use neutral dark glass; the progress card keeps a brighter
+  green fill and stronger face/rim reflections with readable light typography.
+
 - Center the actual play glyph in medium and expanded music controls, including
   hover/press offsets and narrower layouts.
 - Add three softly moving, cover-coloured glows behind expanded lyrics. Smooth

@@ -533,13 +533,33 @@ impl Canvas {
                 crate::motion::mix(0x202022, 0x303033, (light - press * 0.25).max(0.)),
             );
             content((x, y + dy, w, h));
+            self.glass_finish((x, y + dy, w, h), radius, light);
+            dy
+        }
+    }
+    pub unsafe fn glass_panel(
+        &self,
+        bounds: (f32, f32, f32, f32),
+        radius: f32,
+        fill: u32,
+        hover: f32,
+    ) {
+        unsafe {
+            self.rect(bounds.0, bounds.1, bounds.2, bounds.3, radius, fill);
+            self.glass_finish(bounds, radius, hover);
+        }
+    }
+    unsafe fn glass_finish(&self, bounds: (f32, f32, f32, f32), radius: f32, hover: f32) {
+        unsafe {
+            let (x, y, w, h) = bounds;
             // A face reflection is composited over an opaque base. It does not
             // expose wallpaper or include another outline around the icon.
+            let face_alpha = (16. + hover.clamp(0., 1.) * 12.) as u32;
             if let Ok(stops) = self.target.CreateGradientStopCollection(
                 &[
                     D2D1_GRADIENT_STOP {
                         position: 0.,
-                        color: color(0x10ffffff),
+                        color: color((face_alpha << 24) | 0xffffff),
                     },
                     D2D1_GRADIENT_STOP {
                         position: 0.55,
@@ -554,10 +574,10 @@ impl Canvas {
                 D2D1_EXTEND_MODE_CLAMP,
             ) && let Ok(brush) = self.target.CreateLinearGradientBrush(
                 &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
-                    startPoint: Vector2 { X: x, Y: y + dy },
+                    startPoint: Vector2 { X: x, Y: y },
                     endPoint: Vector2 {
                         X: x + w * 0.25,
-                        Y: y + h + dy,
+                        Y: y + h,
                     },
                 },
                 None,
@@ -565,15 +585,14 @@ impl Canvas {
             ) {
                 self.target.FillRoundedRectangle(
                     &D2D1_ROUNDED_RECT {
-                        rect: rect(x, y + dy, w, h),
+                        rect: rect(x, y, w, h),
                         radiusX: radius,
                         radiusY: radius,
                     },
                     &brush,
                 );
             }
-            self.glass_edge(x, y + dy, w, h, radius, light);
-            dy
+            self.glass_edge(x, y, w, h, radius, hover);
         }
     }
     pub unsafe fn glass_edge(&self, x: f32, y: f32, w: f32, h: f32, radius: f32, hover: f32) {
@@ -2390,6 +2409,77 @@ impl Canvas {
             }
         }
     }
+    pub unsafe fn design_glass_clock(&self, text: &str, bounds: (f32, f32, f32, f32)) {
+        unsafe {
+            let Ok(format) = self.design_format((36., 600, 0)) else {
+                return;
+            };
+            let text = text.encode_utf16().collect::<Vec<_>>();
+            let (x, y, w, h) = bounds;
+            // Subpixel rim and shallow lower bevel belong to the glyphs only;
+            // the clock has no glow or translucent rectangular backdrop.
+            for (dx, dy, ink) in [(-0.45, -0.45, 0x58ffffff), (0.55, 0.7, 0x80363840)] {
+                if let Ok(brush) = self.brush(ink) {
+                    self.target.DrawText(
+                        &text,
+                        &format,
+                        &rect(x + dx, y + dy, w, h),
+                        &brush,
+                        D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                        DWRITE_MEASURING_MODE_NATURAL,
+                    );
+                }
+            }
+            let stops = self.target.CreateGradientStopCollection(
+                &[
+                    D2D1_GRADIENT_STOP {
+                        position: 0.,
+                        color: color(0xf4f7fb),
+                    },
+                    D2D1_GRADIENT_STOP {
+                        position: 0.4,
+                        color: color(0xa8b0bb),
+                    },
+                    D2D1_GRADIENT_STOP {
+                        position: 0.48,
+                        color: color(0xe3e8ee),
+                    },
+                    D2D1_GRADIENT_STOP {
+                        position: 0.57,
+                        color: color(0x919ba8),
+                    },
+                    D2D1_GRADIENT_STOP {
+                        position: 1.,
+                        color: color(0x737d8b),
+                    },
+                ],
+                D2D1_GAMMA_2_2,
+                D2D1_EXTEND_MODE_CLAMP,
+            );
+            if let Ok(stops) = stops
+                && let Ok(brush) = self.target.CreateLinearGradientBrush(
+                    &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
+                        startPoint: Vector2 { X: x, Y: y + 12. },
+                        endPoint: Vector2 {
+                            X: x + 18.,
+                            Y: y + 43.,
+                        },
+                    },
+                    None,
+                    &stops,
+                )
+            {
+                self.target.DrawText(
+                    &text,
+                    &format,
+                    &rect(x, y, w, h),
+                    &brush,
+                    D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                    DWRITE_MEASURING_MODE_NATURAL,
+                );
+            }
+        }
+    }
     pub unsafe fn liquid_level(
         &self,
         b: (f32, f32, f32, f32),
@@ -3040,6 +3130,7 @@ impl Canvas {
 pub(crate) const FOCUS_FILL: u32 = 0x3b2633;
 pub(crate) const WATER_FILL: u32 = 0x262626;
 pub(crate) const TASK_FILL: u32 = 0x1b2521;
+pub(crate) const TASK_PROGRESS_FILL: u32 = 0x286b3b;
 pub(crate) const TASK_ACCENT: u32 = 0x57fa65;
 pub(crate) const SHELF_FILL: u32 = 0x443621;
 fn material_fill(accent: Option<u32>) -> u32 {
@@ -3114,6 +3205,78 @@ pub fn wave_height(x: f64, span: f64, phase: f64, back: bool) -> f64 {
 #[cfg(test)]
 mod waveform_tests {
     use super::*;
+    #[test]
+    fn clock_reflection_stays_in_the_glyphs_and_task_panels_stay_opaque() {
+        unsafe {
+            let canvas = Canvas::image(220, 80).unwrap();
+            canvas.target.BeginDraw();
+            canvas.target.Clear(Some(&D2D1_COLOR_F::default()));
+            canvas.design_glass_clock("12.00", (20., 2., 147., 57.6));
+            canvas.end().unwrap();
+            let mut pixels = vec![0; 220 * 80 * 4];
+            canvas
+                .bitmap
+                .as_ref()
+                .unwrap()
+                .CopyPixels(std::ptr::null(), 220 * 4, &mut pixels)
+                .unwrap();
+            let ink = pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|p| p[3] > 245)
+                .collect::<Vec<_>>();
+            assert!(ink.len() > 300);
+            assert!(
+                ink.iter().filter(|p| p[2] > 210).count() > 20,
+                "upper specular reflection"
+            );
+            assert!(
+                ink.iter().filter(|p| p[2] < 150).count() > 20,
+                "deeper lower glass face"
+            );
+            assert!(
+                pixels
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| i % 220 >= 170)
+                    .all(|(_, p)| p[3] == 0),
+                "no clock background glow"
+            );
+            let canvas = Canvas::image(200, 160).unwrap();
+            canvas.target.BeginDraw();
+            canvas.target.Clear(Some(&D2D1_COLOR_F::default()));
+            canvas.glass_panel((5., 5., 80., 150.), 10., 0x202022, 0.);
+            canvas.glass_panel((105., 5., 90., 150.), 13., TASK_PROGRESS_FILL, 0.6);
+            canvas.end().unwrap();
+            let mut pixels = vec![0; 200 * 160 * 4];
+            canvas
+                .bitmap
+                .as_ref()
+                .unwrap()
+                .CopyPixels(std::ptr::null(), 200 * 4, &mut pixels)
+                .unwrap();
+            let pixel = |x: usize, y: usize| &pixels[(y * 200 + x) * 4..(y * 200 + x) * 4 + 4];
+            let dark = pixel(45, 80);
+            let green = pixel(150, 80);
+            assert_eq!(dark[3], 255);
+            assert_eq!(green[3], 255);
+            assert!(
+                (i16::from(dark[1]) - i16::from(dark[2])).abs() <= 3,
+                "list is neutral dark glass"
+            );
+            assert!(
+                green[1] > 95 && u16::from(green[1]) > u16::from(green[2]) * 2,
+                "brighter green progress card"
+            );
+            assert!(
+                pixel(150, 5)[2] > green[2] + 35,
+                "visible progress-card rim"
+            );
+        }
+    }
     #[test]
     fn play_ink_is_centered_inside_large_and_medium_buttons() {
         unsafe {
@@ -3601,13 +3764,50 @@ mod waveform_tests {
     #[test]
     #[ignore = "Creates two small temporary windows to sample DWM composition; run explicitly on an unlocked desktop"]
     fn desktop_compositor_preserves_shell_alpha() {
+        let _buffered_paint = crate::input::BufferedPainting::new().unwrap();
+        unsafe extern "system" fn edit_proc(
+            hwnd: HWND,
+            msg: u32,
+            wp: windows::Win32::Foundation::WPARAM,
+            lp: windows::Win32::Foundation::LPARAM,
+        ) -> windows::Win32::Foundation::LRESULT {
+            unsafe {
+                let original =
+                    std::mem::transmute::<isize, WNDPROC>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+                if msg == WM_ERASEBKGND {
+                    return windows::Win32::Foundation::LRESULT(1);
+                }
+                if msg == WM_PAINT && crate::input::paint_opaque(hwnd, original) {
+                    return windows::Win32::Foundation::LRESULT(0);
+                }
+                let result = CallWindowProcW(original, hwnd, msg, wp, lp);
+                crate::input::refresh_opaque(hwnd, msg);
+                result
+            }
+        }
         unsafe extern "system" fn wndproc(
             hwnd: HWND,
             msg: u32,
             wp: windows::Win32::Foundation::WPARAM,
             lp: windows::Win32::Foundation::LPARAM,
         ) -> windows::Win32::Foundation::LRESULT {
-            unsafe { windows::Win32::UI::WindowsAndMessaging::DefWindowProcW(hwnd, msg, wp, lp) }
+            unsafe {
+                if msg == WM_CTLCOLOREDIT {
+                    let dc = HDC(wp.0 as *mut _);
+                    let background = if GetWindowLongPtrW(hwnd, GWLP_USERDATA) == 1 {
+                        crate::input::FIELD_COLORREF
+                    } else {
+                        crate::input::TASK_FIELD_COLORREF
+                    };
+                    SetBkColor(dc, background);
+                    SetTextColor(dc, crate::input::TEXT_COLORREF);
+                    SetDCBrushColor(dc, background);
+                    return windows::Win32::Foundation::LRESULT(
+                        GetStockObject(DC_BRUSH).0 as isize,
+                    );
+                }
+                DefWindowProcW(hwnd, msg, wp, lp)
+            }
         }
         use windows::Win32::{
             Graphics::{Dwm::*, Gdi::*},
@@ -3705,6 +3905,8 @@ mod waveform_tests {
                 None,
             )
             .unwrap();
+            let original = SetWindowLongPtrW(edit, GWLP_WNDPROC, edit_proc as *const () as isize);
+            SetWindowLongPtrW(edit, GWLP_USERDATA, original);
             let canvas = Canvas::new(front, 80, 80, true).unwrap();
             canvas
                 .begin_shell_palette(
@@ -3752,6 +3954,46 @@ mod waveform_tests {
                     }
                 }
             }
+            SendMessageW(
+                edit,
+                WM_CHAR,
+                Some(windows::Win32::Foundation::WPARAM('A' as usize)),
+                Some(windows::Win32::Foundation::LPARAM(1)),
+            );
+            SendMessageW(
+                edit,
+                windows::Win32::UI::Controls::EM_SETSEL,
+                Some(windows::Win32::Foundation::WPARAM(0)),
+                Some(windows::Win32::Foundation::LPARAM(1)),
+            );
+            SendMessageW(
+                edit,
+                windows::Win32::UI::Controls::EM_REPLACESEL,
+                Some(windows::Win32::Foundation::WPARAM(1)),
+                Some(windows::Win32::Foundation::LPARAM(w!("B").0 as isize)),
+            );
+            let mut text = [0_u16; 8];
+            let count = GetWindowTextW(edit, &mut text);
+            DwmFlush().unwrap();
+            let after_typing = GetPixel(dc, x + 58, y + 58).0;
+            let mut letters = 0;
+            for py in 40..59 {
+                for px in 40..59 {
+                    let pixel = GetPixel(dc, x + px, y + py).0;
+                    if pixel & 255 > 180 && (pixel >> 8) & 255 > 180 && (pixel >> 16) & 255 > 180 {
+                        letters += 1;
+                    }
+                }
+            }
+            SetWindowLongPtrW(front, GWLP_USERDATA, 1);
+            SendMessageW(
+                edit,
+                WM_SETTEXT,
+                None,
+                Some(windows::Win32::Foundation::LPARAM(w!("").0 as isize)),
+            );
+            DwmFlush().unwrap();
+            let calendar_field = GetPixel(dc, x + 50, y + 50).0;
             let _ = ReleaseDC(None, dc);
             drop(canvas);
             DestroyWindow(front).unwrap();
@@ -3763,7 +4005,30 @@ mod waveform_tests {
                 "DWM must reveal the probe background at the transparent corner; center={center:06x}"
             );
             assert_eq!(center, 0x403020, "shell interior must remain opaque");
-            assert_eq!(child, 0xffffff, "native child edit must remain opaque");
+            assert_eq!(
+                child,
+                crate::input::TASK_FIELD_COLORREF.0,
+                "dark native child edit must remain opaque"
+            );
+            assert_eq!(
+                String::from_utf16_lossy(&text[..count as usize]),
+                "B",
+                "typing and replacement remain native"
+            );
+            assert!(
+                letters > 4,
+                "typed text must remain visible on the dark input: {letters}"
+            );
+            assert_eq!(
+                after_typing,
+                crate::input::TASK_FIELD_COLORREF.0,
+                "input remains opaque after native edits"
+            );
+            assert_eq!(
+                calendar_field,
+                crate::input::FIELD_COLORREF.0,
+                "calendar input stays opaque too"
+            );
             assert!(
                 partial >= 12,
                 "DWM must preserve fractional edge pixels through the guarded Win32 region: {partial}"

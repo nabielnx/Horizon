@@ -1194,11 +1194,9 @@ impl Window {
         unsafe {
             mono_badge(c, "clock", (30., 12., 31., 31.));
             mono_badge(c, "calendar-dots", (30., 50., 32., 32.));
-            label(
-                c,
+            c.design_glass_clock(
                 &Local::now().format("%H.%M").to_string(),
-                (71., 2., 147.),
-                (36., 600, 0x85ffffff, 0),
+                (71., 2., 147., 57.6),
             );
             let date = Local::now().format("%A, %-d %B %Y").to_string();
             let date_width = c.design_measure(&date, 2000., (15., 600, 0)).0;
