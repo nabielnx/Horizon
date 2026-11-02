@@ -16,6 +16,36 @@ use windows::Win32::{
 
 pub const HOVER_LEAVE_MS: u64 = 150;
 
+/// Idle bounds interpolate from the surface actually on screen, not an
+/// assumed compact frame. This prevents Indicator -> Compact -> Peek flashes.
+pub struct Transition {
+    from: Size,
+    to: Size,
+    started: std::time::Instant,
+    pub current: Size,
+}
+impl Transition {
+    pub fn new(from: Size, to: Size, now: std::time::Instant) -> Self {
+        Self {
+            from,
+            to,
+            started: now,
+            current: from,
+        }
+    }
+    pub fn step(&mut self, now: std::time::Instant) -> bool {
+        let progress =
+            (now.saturating_duration_since(self.started).as_secs_f32() / 0.26).clamp(0., 1.);
+        let t = crate::motion::ease(progress);
+        self.current = Size {
+            width: self.from.width + (self.to.width - self.from.width) * t,
+            height: self.from.height + (self.to.height - self.from.height) * t,
+            shape: self.from.shape + (self.to.shape - self.from.shape) * t,
+        };
+        progress < 1.
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     Expanded,
@@ -35,6 +65,20 @@ pub struct Size {
 }
 
 impl Mode {
+    pub fn idle_geometry(self, panel_width: f32) -> Size {
+        let mode = if self == Self::Expanded {
+            Self::Peek
+        } else {
+            self
+        };
+        let mut size = mode.size(panel_width);
+        size.shape = match mode {
+            Self::Peek => 1.,
+            Self::Compact => 1. - 9. / 14.,
+            _ => 0.,
+        };
+        size
+    }
     #[allow(dead_code)]
     pub fn size(self, panel_width: f32) -> Size {
         let width = if panel_width.is_finite() {
@@ -220,6 +264,24 @@ pub unsafe fn foreground(root: HWND, settings: HWND) -> Foreground {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn indicator_opens_directly_to_peek_and_reverses_from_visible_bounds() {
+        let now = std::time::Instant::now();
+        let indicator = Mode::Indicator.idle_geometry(680.);
+        let peek = Mode::Peek.idle_geometry(680.);
+        let mut opening = Transition::new(indicator, peek, now);
+        assert_eq!(opening.current, indicator);
+        assert!(opening.step(now + std::time::Duration::from_millis(30)));
+        let visible = opening.current;
+        assert!(visible.height > indicator.height && visible.height < peek.height);
+        let mut closing = Transition::new(visible, indicator, now);
+        assert_eq!(closing.current, visible);
+        assert!(!closing.step(now + std::time::Duration::from_millis(300)));
+        assert_eq!(closing.current, indicator);
+        assert!(!opening.step(now + std::time::Duration::from_millis(300)));
+        assert_eq!(opening.current, peek);
+    }
 
     #[test]
     fn lyrics_pin_keeps_compact_above_normal_apps_but_not_fullscreen() {

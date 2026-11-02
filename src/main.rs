@@ -166,6 +166,7 @@ struct Window {
     hovered: bool,
     hover_tick: Option<Instant>,
     mode: shell_policy::Mode,
+    idle_transition: Option<shell_policy::Transition>,
     last_policy_check: Instant,
     page: usize,
     hits: Vec<Hit>,
@@ -402,25 +403,13 @@ pub(crate) unsafe fn region(hwnd: HWND, w: &Window) {
     } as f32;
     let radius = 37. * (1. - p) + EXPANDED_RADIUS * p;
 
-    let (compact_w, compact_h) = match w.mode {
-        shell_policy::Mode::Indicator => (54., 6.),
-        _ => (310., 50.),
-    };
-    let peek_h = 101.;
-
-    let peek = w.peek;
-    let idle_w = compact_w + (full_w.min(591.) - compact_w) * peek;
-    let width = idle_w + (full_w - idle_w) * p;
-    let idle_h = compact_h + (peek_h - compact_h) * peek;
-    let height = idle_h + (full_h - idle_h) * p;
+    let idle = w.idle_geometry();
+    let width = idle.width + (full_w - idle.width) * p;
+    let height = idle.height + (full_h - idle.height) * p;
     let offset = (full_w - width) / 2.;
     // Compact's exported shoulder is 9px; peek has straight sides. Expansion
     // alone cannot distinguish those two contours, so include the peek phase.
-    let shape = if w.mode == shell_policy::Mode::Indicator {
-        p
-    } else {
-        1. - (1. - p) * (1. - peek) * 9. / 14.
-    };
+    let shape = idle.shape + (1. - idle.shape) * p;
     let raw_points: Vec<POINT> = layout::contour(width, height, shape, radius)
         .into_iter()
         .map(|(x, y)| POINT {
@@ -447,10 +436,29 @@ pub(crate) unsafe fn region(hwnd: HWND, w: &Window) {
         let _ = DeleteObject(rgn.into());
     }
 }
-pub(crate) unsafe fn update_policy(hwnd: HWND, w: &mut Window) {
-    if w.settings || w.offscreen {
+impl Window {
+    fn idle_geometry(&self) -> shell_policy::Size {
+        self.idle_transition
+            .as_ref()
+            .map(|t| t.current)
+            .unwrap_or_else(|| {
+                self.mode
+                    .idle_geometry(self.shared.borrow().data.settings.width as f32)
+            })
+    }
+}
+fn set_mode(w: &mut Window, next: shell_policy::Mode) {
+    if next == w.mode {
         return;
     }
+    let from = w.idle_geometry();
+    let settings = &w.shared.borrow().data.settings;
+    let to = next.idle_geometry(settings.width as f32);
+    w.idle_transition = (settings.motion && from != to)
+        .then(|| shell_policy::Transition::new(from, to, Instant::now()));
+    w.mode = next;
+}
+unsafe fn desired_mode(hwnd: HWND, w: &Window) -> shell_policy::Mode {
     let fg = shell_policy::foreground(hwnd, w.shared.borrow().settings_window);
     let state = w.shared.borrow();
     let playing = state.media.as_ref().is_some_and(|m| {
@@ -469,10 +477,16 @@ pub(crate) unsafe fn update_policy(hwnd: HWND, w: &mut Window) {
         has_alert: state.alert.is_some(),
     };
     drop(state);
-    let next_mode = shell_policy::decide(inputs);
+    shell_policy::decide(inputs)
+}
+pub(crate) unsafe fn update_policy(hwnd: HWND, w: &mut Window) {
+    if w.settings || w.offscreen {
+        return;
+    }
+    let next_mode = desired_mode(hwnd, w);
     if next_mode != w.mode {
         let was_hidden = w.mode == shell_policy::Mode::Hidden;
-        w.mode = next_mode;
+        set_mode(w, next_mode);
         if !w.shared.borrow().data.settings.motion {
             w.peek_velocity = 0.;
             w.peek = if w.expanded || w.mode == shell_policy::Mode::Peek {
@@ -971,7 +985,7 @@ unsafe fn action(hwnd: HWND, w: &mut Window, a: Action) {
             w.shared.borrow_mut().dismiss_alert();
             persist(w);
             w.expanded = true;
-            w.mode = shell_policy::Mode::Expanded;
+            set_mode(w, shell_policy::Mode::Expanded);
             animate(hwnd, w);
             apply_frame(hwnd, w);
         }
@@ -1331,11 +1345,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                         let _ = DestroyWindow(hwnd);
                     } else {
                         w.expanded = false;
-                        w.mode = if w.hovered {
+                        let mode = if w.hovered {
                             shell_policy::Mode::Peek
                         } else {
                             shell_policy::Mode::Compact
                         };
+                        set_mode(w, mode);
                         animate(hwnd, w);
                         apply_frame(hwnd, w);
                     }
@@ -1552,11 +1567,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         m if m == WM_APP + 10 => {
             if w.expanded {
                 w.expanded = false;
-                w.mode = if w.hovered {
+                let mode = if w.hovered {
                     shell_policy::Mode::Peek
                 } else {
                     shell_policy::Mode::Compact
                 };
+                set_mode(w, mode);
                 animate(hwnd, w);
                 update_policy(hwnd, w);
                 apply_frame(hwnd, w);
@@ -1569,13 +1585,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         }
         WM_HOTKEY => {
             w.expanded = !w.expanded;
-            w.mode = if w.expanded {
+            let mode = if w.expanded {
                 shell_policy::Mode::Expanded
             } else if w.hovered {
                 shell_policy::Mode::Peek
             } else {
                 shell_policy::Mode::Compact
             };
+            set_mode(w, mode);
             animate(hwnd, w);
             apply_frame(hwnd, w);
             LRESULT(0)
@@ -1652,13 +1669,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     return LRESULT(0);
                 }
                 w.expanded = !w.expanded;
-                w.mode = if w.expanded {
+                let mode = if w.expanded {
                     shell_policy::Mode::Expanded
                 } else if w.hovered {
                     shell_policy::Mode::Peek
                 } else {
                     shell_policy::Mode::Compact
                 };
+                set_mode(w, mode);
                 animate(hwnd, w);
                 apply_frame(hwnd, w);
             }
@@ -1783,6 +1801,7 @@ unsafe fn create(shared: Rc<RefCell<Shared>>, settings: bool, offscreen: bool) -
         hovered: false,
         hover_tick: None,
         mode: shell_policy::Mode::Compact,
+        idle_transition: None,
         last_policy_check: Instant::now(),
         page: if settings { 0 } else { 1 },
         hits: vec![],
@@ -1941,9 +1960,17 @@ unsafe fn create(shared: Rc<RefCell<Shared>>, settings: bool, offscreen: bool) -
                 .store(hwnd.0 as usize, std::sync::atomic::Ordering::Relaxed);
         }
     }
+    if !settings && !offscreen {
+        // Resolve visibility before the first presentation, rather than showing
+        // Compact and correcting it on the first policy timer.
+        w.mode = desired_mode(hwnd, w);
+        w.idle_transition = None;
+    }
     apply_frame(hwnd, w);
     prepare_first_frame(hwnd, w)?;
-    let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    if settings || w.mode != shell_policy::Mode::Hidden {
+        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    }
     let _ = InvalidateRect(Some(hwnd), None, false);
     let _ = UpdateWindow(hwnd);
     Ok(hwnd)

@@ -98,7 +98,7 @@ impl Window {
         let width = self.shared.borrow().data.settings.width as f32;
         if self.expanded && self.page >= 3 {
             (1., 0.)
-        } else if !self.expanded && (self.mode == shell_policy::Mode::Compact || self.peek < 0.5) {
+        } else if !self.expanded && self.mode == shell_policy::Mode::Compact {
             (1., (width - 591.) / 2.)
         } else {
             (
@@ -125,9 +125,7 @@ impl Window {
                 0.
             };
             let motion = state.data.settings.motion;
-            let rail_h = if !self.expanded
-                && (self.mode == shell_policy::Mode::Compact || self.peek < 0.5)
-            {
+            let rail_h = if !self.expanded && self.mode == shell_policy::Mode::Compact {
                 2.5
             } else {
                 4.
@@ -319,15 +317,9 @@ impl Window {
                 .as_ref()
                 .and_then(|m| m.snapshot.lock().ok().map(|t| t.clone()))
                 .unwrap_or_default();
-            let compact = if self.mode == shell_policy::Mode::Indicator {
-                (54., 6.)
-            } else {
-                (310., 50.)
-            };
-            let idle_w = compact.0 + (width.min(591.) - compact.0) * self.peek;
-            let nw = idle_w + (width - idle_w) * self.expansion;
-            let idle_h = compact.1 + (101. - compact.1) * self.peek;
-            let nh = idle_h + (host_height() as f32 - idle_h) * self.expansion;
+            let idle = self.idle_geometry();
+            let nw = idle.width + (width - idle.width) * self.expansion;
+            let nh = idle.height + (host_height() as f32 - idle.height) * self.expansion;
             c.rect((width - nw) / 2., 0., nw, nh, 0., 0x000000);
             if self.mode == shell_policy::Mode::Indicator && self.expansion < 0.01 {
                 return true;
@@ -335,7 +327,7 @@ impl Window {
             let (scale, offset) = self.figma_transform();
             c.design_transform(scale, offset);
             if !self.expanded {
-                if self.mode == shell_policy::Mode::Compact || self.peek < 0.5 {
+                if self.mode == shell_policy::Mode::Compact {
                     let left = (591. - 310.) / 2.;
                     if s.album_colors && track.palette.is_some() {
                         c.design_glow_at(
@@ -413,14 +405,16 @@ impl Window {
     }
     unsafe fn figma_cover(&self, c: &Canvas, track: &media::Track, b: (f32, f32, f32, f32)) {
         unsafe {
-            if let Some(bytes) = &track.cover {
-                let _ = c.cover_rect(
+            let drawn = track.cover.as_ref().is_some_and(|bytes| {
+                c.cover_rect(
                     &format!("{}|{}|{}", track.title, track.artist, track.cover_revision),
                     bytes,
                     b,
                     13.,
-                );
-            } else {
+                )
+                .is_ok()
+            });
+            if !drawn {
                 c.rect(b.0, b.1, b.2, b.3, 13., 0x232323);
                 asset(
                     c,

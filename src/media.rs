@@ -4,12 +4,12 @@ use std::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc,
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 use windows::{
     Foundation::TypedEventHandler,
     Media::Control::*,
-    Storage::Streams::DataReader,
+    Storage::Streams::{DataReader, InputStreamOptions},
     Win32::{
         Foundation::{HWND, LPARAM, WPARAM},
         System::WinRT::*,
@@ -28,6 +28,8 @@ pub struct Track {
     pub updated: Option<Instant>,
     pub cover: Option<Arc<Vec<u8>>>,
     pub cover_revision: u64,
+    pub cover_error: String,
+    pub cover_attempts: u8,
     pub palette: Option<[u32; 3]>,
     pub lyrics: Arc<Vec<crate::lyrics::Line>>,
     pub lyrics_loaded: bool,
@@ -63,6 +65,7 @@ pub enum Command {
     Refresh,
     Playback,
     LyricsChanged,
+    CoverReady,
     Toggle,
     Previous,
     Next,
@@ -87,40 +90,163 @@ pub fn notify(target: &AtomicUsize) {
         }
     }
 }
-fn read_thumbnail(
-    props: &GlobalSystemMediaTransportControlsSessionMediaProperties,
-) -> Option<(Arc<Vec<u8>>, [u32; 3])> {
-    (|| -> windows::core::Result<Vec<u8>> {
-        let stream = props.Thumbnail()?.OpenReadAsync()?.join()?;
-        let size = stream.Size()?;
-        if size == 0 || size > 25_000_000 {
-            return Ok(vec![]);
-        }
-        let reader = DataReader::CreateDataReader(&stream)?;
-        let mut bytes = vec![0u8; size as usize];
-        let mut offset = 0;
-        while offset < bytes.len() {
-            let to_read = (bytes.len() - offset).min(1024 * 1024) as u32;
-            let loaded = reader.LoadAsync(to_read)?.join()? as usize;
-            if loaded == 0 {
-                break;
-            }
-            reader.ReadBytes(&mut bytes[offset..offset + loaded])?;
-            offset += loaded;
-        }
-        let _ = reader.Close();
-        let _ = stream.Close();
-        if offset != bytes.len() {
+fn await_operation<T: windows::core::RuntimeType>(
+    operation: windows_future::IAsyncOperation<T>,
+    deadline: Instant,
+    alive: &impl Fn() -> bool,
+) -> windows::core::Result<T> {
+    while operation.Status()?.0 == 0 {
+        if !alive() || Instant::now() >= deadline {
+            let _ = operation.Cancel();
             return Err(windows::core::Error::new(
-                windows::Win32::Foundation::E_FAIL,
-                "Incomplete media thumbnail",
+                windows::core::HRESULT(0x800705B4u32 as i32),
+                "Media request expired or was superseded",
             ));
         }
-        Ok(bytes)
-    })()
-    .ok()
-    .filter(|b| !b.is_empty())
-    .and_then(validated_thumbnail)
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if !alive() {
+        return Err(windows::core::Error::new(
+            windows::Win32::Foundation::E_ABORT,
+            "Media request was superseded",
+        ));
+    }
+    operation.GetResults()
+}
+
+fn read_thumbnail(
+    props: &GlobalSystemMediaTransportControlsSessionMediaProperties,
+    alive: &impl Fn() -> bool,
+) -> windows::core::Result<(Arc<Vec<u8>>, [u32; 3])> {
+    let deadline = Instant::now() + Duration::from_secs(4);
+    let stream = await_operation(props.Thumbnail()?.OpenReadAsync()?, deadline, alive)?;
+    let bytes = (|| -> windows::core::Result<Vec<u8>> {
+        const LIMIT: usize = 25_000_000;
+        let size = stream.Size().unwrap_or(0) as usize;
+        if size > LIMIT {
+            return Err(windows::core::Error::new(
+                windows::Win32::Foundation::E_INVALIDARG,
+                "Media thumbnail exceeds byte limit",
+            ));
+        }
+        let reader = DataReader::CreateDataReader(&stream)?;
+        let result = (|| {
+            reader.SetInputStreamOptions(InputStreamOptions::Partial)?;
+            let mut bytes = Vec::with_capacity(size.min(512 * 1024));
+            loop {
+                // Some players expose a stream before a useful Size is known.
+                // Read actual partial chunks, keeping both time and bytes bounded.
+                let to_read = if size > 0 {
+                    if bytes.len() >= size {
+                        break;
+                    }
+                    (size - bytes.len()).min(64 * 1024)
+                } else {
+                    (LIMIT + 1 - bytes.len()).min(64 * 1024)
+                };
+                let loaded =
+                    await_operation(reader.LoadAsync(to_read as u32)?, deadline, alive)? as usize;
+                if loaded == 0 {
+                    break;
+                }
+                if bytes.len() + loaded > LIMIT {
+                    return Err(windows::core::Error::new(
+                        windows::Win32::Foundation::E_INVALIDARG,
+                        "Media thumbnail exceeds byte limit",
+                    ));
+                }
+                let offset = bytes.len();
+                bytes.resize(offset + loaded, 0);
+                reader.ReadBytes(&mut bytes[offset..])?;
+            }
+            Ok(bytes)
+        })();
+        let _ = reader.Close();
+        result
+    })();
+    let _ = stream.Close();
+    validated_thumbnail(bytes?).ok_or_else(|| {
+        windows::core::Error::new(
+            windows::Win32::Foundation::E_FAIL,
+            "Empty or undecodable media thumbnail",
+        )
+    })
+}
+
+fn track_cover_key(track: &Track) -> String {
+    format!(
+        "{}|{}|{}|{}",
+        track.source_app, track.title, track.artist, track.album
+    )
+}
+fn keep_last_track(state: &Mutex<Track>, source_app: &str) -> bool {
+    let Ok(mut data) = state.lock() else {
+        return false;
+    };
+    if data.source_app == source_app {
+        return true;
+    }
+    *data = Track::default();
+    false
+}
+struct CoverJob {
+    key: String,
+    session: GlobalSystemMediaTransportControlsSession,
+}
+struct CoverResult {
+    key: String,
+    image: windows::core::Result<(Arc<Vec<u8>>, [u32; 3])>,
+}
+fn cover_worker(
+    state: Arc<Mutex<Track>>,
+    wake: mpsc::Sender<Command>,
+) -> (mpsc::SyncSender<CoverJob>, mpsc::Receiver<CoverResult>) {
+    let (send, receive) = mpsc::sync_channel::<CoverJob>(1);
+    let (results, completed) = mpsc::channel();
+    std::thread::spawn(move || {
+        if unsafe { RoInitialize(RO_INIT_MULTITHREADED) }.is_err() {
+            return;
+        }
+        while let Ok(job) = receive.recv() {
+            let alive = || {
+                state
+                    .lock()
+                    .is_ok_and(|track| track_cover_key(&track) == job.key)
+            };
+            let image = (|| {
+                let props = await_operation(
+                    job.session.TryGetMediaPropertiesAsync()?,
+                    Instant::now() + Duration::from_secs(2),
+                    &alive,
+                )?;
+                let props_key = format!(
+                    "{}|{}|{}|{}",
+                    job.session.SourceAppUserModelId()?,
+                    props.Title()?,
+                    props.Artist()?,
+                    props.AlbumTitle()?
+                );
+                if props_key != job.key {
+                    return Err(windows::core::Error::new(
+                        windows::Win32::Foundation::E_ABORT,
+                        "Cover belongs to a newer track",
+                    ));
+                }
+                read_thumbnail(&props, &alive)
+            })();
+            if results
+                .send(CoverResult {
+                    key: job.key,
+                    image,
+                })
+                .is_err()
+            {
+                break;
+            }
+            let _ = wake.send(Command::CoverReady);
+        }
+    });
+    (send, completed)
 }
 
 fn validated_thumbnail(bytes: Vec<u8>) -> Option<(Arc<Vec<u8>>, [u32; 3])> {
@@ -209,12 +335,45 @@ impl Media {
                 let mut next_metadata = Instant::now();
                 let mut cover_cache: std::collections::VecDeque<CachedCover> =
                     std::collections::VecDeque::with_capacity(4);
+                let (cover_jobs, cover_results) = cover_worker(state.clone(), events.clone());
+                let mut cover_pending = false;
                 loop {
+                    while let Ok(result) = cover_results.try_recv() {
+                        cover_pending = false;
+                        if let Ok(mut data) = state.lock()
+                            && track_cover_key(&data) == result.key
+                        {
+                            match result.image {
+                                Ok((cover, palette)) => {
+                                    cache_cover(
+                                        &mut cover_cache,
+                                        (result.key, cover.clone(), Some(palette)),
+                                    );
+                                    data.cover = Some(cover);
+                                    data.palette = Some(palette);
+                                    data.cover_revision = data.cover_revision.wrapping_add(1);
+                                    data.cover_error.clear();
+                                }
+                                Err(error) => {
+                                    if error.code() == windows::Win32::Foundation::E_ABORT {
+                                        refresh = true;
+                                    }
+                                    data.cover_error = error.to_string();
+                                }
+                            }
+                            notify(&gui);
+                        }
+                    }
                     if Instant::now() >= next_metadata {
                         refresh = true;
                     }
                     if refresh {
-                        next_metadata = Instant::now() + std::time::Duration::from_secs(15);
+                        next_metadata = Instant::now()
+                            + Duration::from_secs(if state.lock().is_ok_and(|data| data.playing) {
+                                5
+                            } else {
+                                15
+                            });
                         if let Some((old, media, play)) = attached.take() {
                             let _ = old.RemoveMediaPropertiesChanged(media);
                             let _ = old.RemovePlaybackInfoChanged(play);
@@ -252,20 +411,23 @@ impl Media {
                                 },
                             ))?;
                             if let Ok(op) = session.TryGetMediaPropertiesAsync()
-                                && let Ok(props) = op.join()
+                                && let Ok(props) = await_operation(
+                                    op,
+                                    Instant::now() + Duration::from_secs(2),
+                                    &|| true,
+                                )
                             {
                                 let title =
                                     props.Title().map(|s| s.to_string()).unwrap_or_default();
                                 let artist =
                                     props.Artist().map(|s| s.to_string()).unwrap_or_default();
                                 if title.is_empty() && artist.is_empty() {
-                                    let _ = session.RemoveMediaPropertiesChanged(media);
-                                    let _ = session.RemovePlaybackInfoChanged(play);
-                                    attached = None;
-                                    if let Ok(mut data) = state.lock() {
-                                        *data = Track::default();
+                                    let same_player = keep_last_track(&state, &source_app);
+                                    attached = Some((session, media, play));
+                                    next_metadata = Instant::now() + Duration::from_millis(500);
+                                    if !same_player {
+                                        requested = None;
                                     }
-                                    requested = None;
                                     notify(&gui);
                                 } else {
                                     let album = props
@@ -289,31 +451,14 @@ impl Media {
                                     if changed || needs_cover && Instant::now() >= next_cover {
                                         if changed {
                                             cover_retries = 0;
+                                            next_cover = Instant::now();
                                         }
-                                        cover_retries = cover_retries.saturating_add(1);
-                                        next_cover =
-                                            Instant::now() + cover_retry_delay(cover_retries);
                                         let cached_entry = cover_cache
                                             .iter()
                                             .find(|(k, _, _)| k == &track_key)
                                             .map(|(_, c, p)| (c.clone(), *p));
-                                        let (cover, palette) = if let Some((c, p)) = cached_entry {
-                                            cover_retries = 35;
-                                            (Some(c), p)
-                                        } else {
-                                            let (fetched, pal) = read_thumbnail(&props)
-                                                .map(|(bytes, palette)| {
-                                                    (Some(bytes), Some(palette))
-                                                })
-                                                .unwrap_or((None, None));
-                                            if let Some(ref c) = fetched {
-                                                cache_cover(
-                                                    &mut cover_cache,
-                                                    (track_key.clone(), c.clone(), pal),
-                                                );
-                                            }
-                                            (fetched, pal)
-                                        };
+                                        let (cover, palette) = cached_entry
+                                            .map_or((None, None), |(c, p)| (Some(c), p));
                                         let mut should_notify = false;
                                         if let Ok(mut data) = state.lock() {
                                             if changed {
@@ -329,6 +474,8 @@ impl Media {
                                                 data.cover_revision =
                                                     data.cover_revision.wrapping_add(1);
                                                 data.palette = palette;
+                                                data.cover_error.clear();
+                                                data.cover_attempts = 0;
                                                 data.lyrics = Arc::new(vec![]);
                                                 data.lyrics_loaded = false;
                                                 data.lyrics_retry = None;
@@ -352,13 +499,14 @@ impl Media {
                                     attached = Some((session, media, play));
                                 }
                             } else {
-                                let _ = session.RemoveMediaPropertiesChanged(media);
-                                let _ = session.RemovePlaybackInfoChanged(play);
-                                attached = None;
-                                if let Ok(mut data) = state.lock() {
-                                    *data = Track::default();
+                                // Preserve the last good snapshot on a transient
+                                // property failure from the same media player.
+                                let same_player = keep_last_track(&state, &source_app);
+                                attached = Some((session, media, play));
+                                next_metadata = Instant::now() + Duration::from_millis(500);
+                                if !same_player {
+                                    requested = None;
                                 }
-                                requested = None;
                                 notify(&gui);
                             }
                         } else {
@@ -373,46 +521,6 @@ impl Media {
                     }
                     if let Some((session, _, _)) = &attached {
                         let mut alive = false;
-                        let needs_cover = state
-                            .lock()
-                            .map(|data| !data.title.is_empty() && data.cover.is_none())
-                            .unwrap_or(false);
-                        if needs_cover && Instant::now() >= next_cover {
-                            cover_retries = cover_retries.saturating_add(1);
-                            next_cover = Instant::now() + cover_retry_delay(cover_retries);
-                            if let Ok(op) = session.TryGetMediaPropertiesAsync()
-                                && let Ok(props) = op.join()
-                                && let Some((cover, palette)) = read_thumbnail(&props)
-                            {
-                                let palette = Some(palette);
-                                let title =
-                                    props.Title().map(|s| s.to_string()).unwrap_or_default();
-                                let artist =
-                                    props.Artist().map(|s| s.to_string()).unwrap_or_default();
-                                let album = props
-                                    .AlbumTitle()
-                                    .map(|s| s.to_string())
-                                    .unwrap_or_default();
-                                if let Ok(mut data) = state.lock() {
-                                    if data.title == title && data.artist == artist {
-                                        let current_key = format!(
-                                            "{}|{}|{}|{}",
-                                            data.source_app, title, artist, album
-                                        );
-                                        cache_cover(
-                                            &mut cover_cache,
-                                            (current_key, cover.clone(), palette),
-                                        );
-                                        data.cover = Some(cover);
-                                        data.cover_revision = data.cover_revision.wrapping_add(1);
-                                        data.palette = palette;
-                                    } else {
-                                        refresh = true;
-                                    }
-                                }
-                                notify(&gui);
-                            }
-                        }
                         if let (Ok(play), Ok(time)) =
                             (session.GetPlaybackInfo(), session.GetTimelineProperties())
                             && let Ok(status) = play.PlaybackStatus()
@@ -483,17 +591,48 @@ impl Media {
                                     && lyric_request_due(&data, &requested, Instant::now())
                                 {
                                     data.lyrics_retry = None;
-                                    let _ = lyric_jobs.send(crate::lyrics::Job {
-                                        title: data.title.clone(),
-                                        artist: data.artist.clone(),
-                                        duration: data.duration,
-                                    });
+                                    if let Some(lines) = crate::lyrics::cached(
+                                        &data.title,
+                                        &data.artist,
+                                        data.duration,
+                                    )
+                                    .filter(|lines| !lines.is_empty())
+                                    {
+                                        data.lyrics = Arc::new(lines);
+                                        data.lyrics_loaded = true;
+                                        notify(&gui);
+                                    } else {
+                                        let _ = lyric_jobs.send(crate::lyrics::Job {
+                                            title: data.title.clone(),
+                                            artist: data.artist.clone(),
+                                            duration: data.duration,
+                                        });
+                                    }
                                     requested = Some((key, data.duration));
                                 }
                             }
                         }
                         if !alive {
                             refresh = true;
+                        } else if !cover_pending && Instant::now() >= next_cover {
+                            let job = state
+                                .lock()
+                                .ok()
+                                .filter(|data| !data.title.is_empty() && data.cover.is_none())
+                                .map(|data| CoverJob {
+                                    key: track_cover_key(&data),
+                                    session: session.clone(),
+                                });
+                            if let Some(job) = job
+                                && cover_jobs.try_send(job).is_ok()
+                            {
+                                cover_pending = true;
+                                cover_retries = cover_retries.saturating_add(1);
+                                next_cover = Instant::now() + cover_retry_delay(cover_retries);
+                                if let Ok(mut data) = state.lock() {
+                                    data.cover_attempts = cover_retries;
+                                }
+                            }
                         }
                     }
                     let poll_timeout = if state
@@ -508,9 +647,15 @@ impl Media {
                         std::time::Duration::from_secs(1)
                     };
                     match receive.recv_timeout(poll_timeout) {
-                        Ok(Command::Refresh) => refresh = true,
+                        Ok(Command::Refresh) => {
+                            refresh = true;
+                            next_cover = Instant::now();
+                            cover_retries = 0;
+                        }
+                        Ok(Command::CoverReady) => {}
                         Ok(Command::Playback) => {
                             next_cover = Instant::now();
+                            refresh = true;
                         }
                         Ok(Command::LyricsChanged) => {
                             requested = None;
@@ -524,9 +669,33 @@ impl Media {
                         Ok(command) => {
                             if let Some((session, _, _)) = &attached {
                                 let action = match command {
-                                    Command::Toggle => session.TryTogglePlayPauseAsync()?.join(),
-                                    Command::Previous => session.TrySkipPreviousAsync()?.join(),
-                                    Command::Next => session.TrySkipNextAsync()?.join(),
+                                    Command::Toggle => {
+                                        session.TryTogglePlayPauseAsync().and_then(|operation| {
+                                            await_operation(
+                                                operation,
+                                                Instant::now() + Duration::from_secs(2),
+                                                &|| true,
+                                            )
+                                        })
+                                    }
+                                    Command::Previous => {
+                                        session.TrySkipPreviousAsync().and_then(|operation| {
+                                            await_operation(
+                                                operation,
+                                                Instant::now() + Duration::from_secs(2),
+                                                &|| true,
+                                            )
+                                        })
+                                    }
+                                    Command::Next => {
+                                        session.TrySkipNextAsync().and_then(|operation| {
+                                            await_operation(
+                                                operation,
+                                                Instant::now() + Duration::from_secs(2),
+                                                &|| true,
+                                            )
+                                        })
+                                    }
                                     Command::Seek(fraction) => {
                                         let duration =
                                             state.lock().map(|s| s.duration).unwrap_or(0.);
@@ -539,8 +708,14 @@ impl Media {
                                         session
                                             .TryChangePlaybackPositionAsync(
                                                 (target * 10_000_000.) as i64,
-                                            )?
-                                            .join()
+                                            )
+                                            .and_then(|operation| {
+                                                await_operation(
+                                                    operation,
+                                                    Instant::now() + Duration::from_secs(2),
+                                                    &|| true,
+                                                )
+                                            })
                                     }
                                     _ => Ok(false),
                                 };
@@ -580,6 +755,45 @@ impl Media {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn temporary_metadata_failure_keeps_the_same_players_cover_and_lyrics() {
+        let state = Mutex::new(Track {
+            source_app: "Player A".into(),
+            title: "Fixture".into(),
+            cover: Some(Arc::new(vec![1, 2, 3])),
+            lyrics: Arc::new(vec![crate::lyrics::Line {
+                at: 0.,
+                text: "Fixture line".into(),
+            }]),
+            ..Default::default()
+        });
+        assert!(keep_last_track(&state, "Player A"));
+        assert!(state.lock().unwrap().cover.is_some());
+        assert_eq!(state.lock().unwrap().lyrics.len(), 1);
+        assert!(!keep_last_track(&state, "Player B"));
+        assert!(state.lock().unwrap().cover.is_none());
+        assert!(state.lock().unwrap().lyrics.is_empty());
+    }
+    #[test]
+    fn a_stalled_media_operation_does_not_wait_past_its_deadline() {
+        let (release, blocked) = mpsc::channel();
+        let operation = windows_future::IAsyncOperation::<u32>::spawn(move || {
+            blocked.recv().map_err(|_| {
+                windows::core::Error::from_hresult(windows::Win32::Foundation::E_ABORT)
+            })?;
+            Ok(7)
+        });
+        let result = await_operation(
+            operation,
+            Instant::now() + Duration::from_millis(20),
+            &|| true,
+        );
+        let _ = release.send(());
+        assert_eq!(
+            result.unwrap_err().code(),
+            windows::core::HRESULT(0x800705B4u32 as i32)
+        );
+    }
     #[test]
     fn duration_correction_and_expired_lyrics_retry_trigger_new_requests() {
         let now = Instant::now();

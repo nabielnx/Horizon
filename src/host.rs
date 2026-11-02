@@ -86,6 +86,7 @@ pub(super) fn frame_interval(w: &Window) -> Option<Duration> {
         || w.expansion_velocity.abs() > 0.01
         || w.peek_velocity.abs() > 0.01
         || w.overlay.is_some()
+        || w.idle_transition.is_some()
         || w.canvas.as_ref().is_some_and(Canvas::glass_animating)
         || w.palette.active(now)
         || w.expanded && w.page == 2 && w.calendar.active()
@@ -138,6 +139,13 @@ pub(super) unsafe fn frame_step(hwnd: HWND, w: &mut Window) {
         }
     }
     let mut needs_region = false;
+    if let Some(transition) = &mut w.idle_transition {
+        let active = motion && transition.step(now);
+        if !active {
+            w.idle_transition = None;
+        }
+        needs_region = true;
+    }
 
     let target = if w.expanded { 1. } else { 0. };
     if w.expansion != target || w.expansion_velocity != 0. {

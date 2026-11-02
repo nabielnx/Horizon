@@ -14,6 +14,14 @@ The user requested a shorter expanded panel ending below the music transport con
 
 Compact displays the synchronized active lyric centered over the timeline. Alerts take precedence; missing lyrics show loading/unavailable status. It uses the original smooth Samsung-style two-layer wave with cover-derived colour and 1.8× its original motion speed. Played width and playhead share one progress value, with no artificial minimum width. Pause freezes phase; disabling motion remains static. The right outlined bolt is white and opens the panel; it is not a battery indicator.
 
+Startup visibility is resolved before the first presentation. Hover from the
+hidden indicator opens the medium view directly; its first content frame uses
+the medium layout, with geometry interpolated from the actual indicator bounds.
+A click opens the expanded panel. Pointer leave follows the existing policy:
+compact lyrics while pinned, otherwise the indicator above another app. Fullscreen
+hiding remains a separate policy. No intermediate compact layout is rendered
+during an indicator-to-medium hover.
+
 Frame 2 is the playing peek: cover (28,14), metadata x=108, divider x=276, lyric/timeline x=292, and playback button (518,29,40,39). Time labels are enlarged to 9.5 px at y=65 with left/right alignment. Frame 3 is the paused dashboard: plain translucent clock with no background glow/gradient, full date, task/water progress, a small song timeline, and the orange focus card with a Stop/Play pill. Its liquid is inset and clipped to the 11 px card corners, using the same #FF9317 fill as expanded Focus. Actual music playback controls the transport glyph: playing shows two hollow pause bars; paused shows play. White icons intentionally supersede the coloured icons in the references.
 
 Expanded Music retains the 50 px transport controls, removes the queue area, and uses the extra right-hand width for measured lyric paragraphs. Expanded Music, compact, playing peek and the paused dashboard all use the same two-layer waveform renderer, cover colour, playback phase and rail/playhead geometry, sized for their slots. Focus moves its statistics and weekly progress above the new bottom edge. Calendar retains all 42 date cells on integer row positions: the 22 px marker and number share a centre, selected dates have an opaque purple fill with a reflected rim, and today retains a distinct outline. Two agenda items fit per page, and the native four-field event editor keeps save/cancel visible. Air, Tasks and Shelf retain their page content and use the same white sidebar icons as the other pages.

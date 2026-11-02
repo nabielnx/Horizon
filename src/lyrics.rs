@@ -92,27 +92,93 @@ enum Response {
     ServerDown,
 }
 static LAST_HTTP_STATUS: AtomicU32 = AtomicU32::new(0);
+const NEGATIVE_TTL: u64 = 30;
+
+struct HttpClient {
+    connection: Handle,
+    _session: Handle,
+}
+impl HttpClient {
+    fn new() -> Result<Self> {
+        unsafe {
+            let session = Handle::new(WinHttpOpen(
+                w!("Horizon/0.3 (https://github.com/nabielnx/Horizon)").as_ptr(),
+                4,
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+            ))?;
+            if WinHttpSetTimeouts(session.0, 1500, 2000, 2000, 2500) == 0 {
+                return Err(Error::from_thread());
+            }
+            let connection =
+                Handle::new(WinHttpConnect(session.0, w!("lrclib.net").as_ptr(), 443, 0))?;
+            Ok(Self {
+                connection,
+                _session: session,
+            })
+        }
+    }
+}
+thread_local! {
+    // Worker-local ownership keeps handles off the UI thread and reuses TLS.
+    static HTTP_CLIENT: std::cell::RefCell<Option<HttpClient>> = const { std::cell::RefCell::new(None) };
+}
 
 fn get(path: &str, alive: impl Fn() -> bool) -> Result<Response> {
+    if !alive() {
+        return Ok(Response::NotFound);
+    }
     if retry_at().is_some() {
         return Ok(Response::ServerDown);
     }
+    HTTP_CLIENT.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(HttpClient::new()?);
+        }
+        request(slot.as_ref().unwrap(), path, alive)
+    })
+}
+fn response_retry_after(request: &Handle) -> Option<std::time::Duration> {
+    let mut buffer = [0u16; 256];
+    let mut length = std::mem::size_of_val(&buffer) as u32;
+    let ok = unsafe {
+        WinHttpQueryHeaders(
+            request.0,
+            65535,
+            w!("Retry-After").as_ptr(),
+            buffer.as_mut_ptr().cast(),
+            &mut length,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+    let end = buffer.iter().position(|c| *c == 0).unwrap_or(buffer.len());
+    parse_retry_after(
+        &String::from_utf16_lossy(&buffer[..end]),
+        chrono::Utc::now(),
+    )
+}
+fn parse_retry_after(
+    value: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<std::time::Duration> {
+    let seconds = value.trim().parse::<u64>().ok().or_else(|| {
+        chrono::DateTime::parse_from_rfc2822(value.trim())
+            .ok()
+            .map(|at| (at.timestamp() - now.timestamp()).max(0) as u64)
+    })?;
+    Some(std::time::Duration::from_secs(seconds.clamp(1, 604800)))
+}
+fn request(client: &HttpClient, path: &str, alive: impl Fn() -> bool) -> Result<Response> {
     LAST_HTTP_STATUS.store(0, Ordering::Relaxed);
     unsafe {
-        let session = Handle::new(WinHttpOpen(
-            w!("Horizon/0.3 (https://github.com/nabielnx/Horizon)").as_ptr(),
-            4,
-            std::ptr::null(),
-            std::ptr::null(),
-            0,
-        ))?;
-        if WinHttpSetTimeouts(session.0, 3000, 3000, 3000, 3500) == 0 {
-            return Err(Error::from_thread());
-        }
-        let connection = Handle::new(WinHttpConnect(session.0, w!("lrclib.net").as_ptr(), 443, 0))?;
         let path = HSTRING::from(path);
         let request = Handle::new(WinHttpOpenRequest(
-            connection.0,
+            client.connection.0,
             w!("GET").as_ptr(),
             path.as_ptr(),
             std::ptr::null(),
@@ -122,9 +188,17 @@ fn get(path: &str, alive: impl Fn() -> bool) -> Result<Response> {
         ))?;
         let req_send =
             WinHttpSendRequest(request.0, std::ptr::null(), 0, std::ptr::null(), 0, 0, 0);
+        if !alive() {
+            return Ok(Response::NotFound);
+        }
         if req_send == 0 || WinHttpReceiveResponse(request.0, std::ptr::null_mut()) == 0 {
-            defer_retry();
+            if alive() {
+                defer_retry();
+            }
             return Ok(Response::ServerDown);
+        }
+        if !alive() {
+            return Ok(Response::NotFound);
         }
         let mut status = 0u32;
         let mut size = 4;
@@ -140,6 +214,15 @@ fn get(path: &str, alive: impl Fn() -> bool) -> Result<Response> {
             return Err(Error::from_thread());
         }
         LAST_HTTP_STATUS.store(status, Ordering::Relaxed);
+        if matches!(status, 429 | 503)
+            && let Some(delay) = response_retry_after(&request)
+        {
+            if let Ok(mut retry) = RETRY_AT.lock() {
+                retry.at = Some(std::time::Instant::now() + delay);
+                retry.rate_limited = status == 429;
+            }
+            return Ok(Response::ServerDown);
+        }
         if status == 429 {
             defer_rate_limit();
             return Ok(Response::ServerDown);
@@ -341,7 +424,11 @@ pub fn cached(title: &str, artist: &str, duration: f64) -> Option<Vec<Line>> {
 }
 pub fn store_cache(title: &str, artist: &str, duration: f64, lines: Vec<Line>) {
     let key = cache_key(title, artist, duration);
-    let ttl = if lines.is_empty() { 300 } else { 86400 };
+    let ttl = if lines.is_empty() {
+        NEGATIVE_TTL
+    } else {
+        86400
+    };
     if let Ok(mut cache) = LYRIC_CACHE.lock() {
         cache.retain(|(stored, _)| *stored != key);
         cache.push_back((
@@ -444,6 +531,29 @@ fn search_synced(
     }
 }
 
+fn exact_paths(title: &str, artist: &str, duration: f64) -> Vec<String> {
+    let duration = if duration.is_finite() && duration > 10. {
+        format!("&duration={}", duration.round().clamp(1., 3600.) as u64)
+    } else {
+        String::new()
+    };
+    let mut paths = Vec::new();
+    for (title, artist) in [
+        (title.trim().to_string(), artist.trim()),
+        (clean_title(title), first_artist(artist)),
+    ] {
+        let path = format!(
+            "/api/get?track_name={}&artist_name={}{}",
+            encode(&title),
+            encode(artist),
+            duration
+        );
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    paths
+}
 fn fetch(title: &str, artist: &str, duration: f64, alive: impl Fn() -> bool) -> Vec<Line> {
     if !alive() {
         return vec![];
@@ -459,14 +569,9 @@ fn fetch(title: &str, artist: &str, duration: f64, alive: impl Fn() -> bool) -> 
     let fa = first_artist(artist);
     let ct = clean_title(title);
 
-    // 1. Exact match with original title + first artist + duration
-    if duration > 10. {
-        let path = format!(
-            "/api/get?track_name={}&artist_name={}&duration={}",
-            encode(title),
-            encode(fa),
-            duration.round().clamp(1., 3600.) as u64
-        );
+    // Try exact records even while a player's duration is still unavailable.
+    // Preserve band names (e.g. AC/DC) before trying simplified metadata.
+    for path in exact_paths(title, artist, duration) {
         match get(&path, &alive) {
             Ok(Response::Ok(bytes)) => {
                 if let Ok(data) = serde_json::from_slice::<serde_json::Value>(&bytes)
@@ -648,7 +753,9 @@ pub fn worker(
                 }
                 let server_retry = if empty { retry_at() } else { None };
                 data.lyrics_retry = server_retry.or_else(|| {
-                    empty.then(|| std::time::Instant::now() + std::time::Duration::from_secs(300))
+                    empty.then(|| {
+                        std::time::Instant::now() + std::time::Duration::from_secs(NEGATIVE_TTL)
+                    })
                 });
                 data.lyrics_loaded = server_retry.is_none();
                 crate::media::notify(&notify);
@@ -663,6 +770,31 @@ pub fn worker(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn exact_lookup_precedes_search_even_without_duration_and_preserves_band_names() {
+        let paths = exact_paths("Song", "AC/DC", 0.);
+        assert!(paths[0].starts_with("/api/get?"));
+        assert!(paths[0].contains("artist_name=AC%2FDC"));
+        assert!(!paths[0].contains("duration="));
+        assert_eq!(exact_paths("Song", "Artist", 171.).len(), 1);
+        let cleaned = exact_paths("Song (Official Video)", "Artist", 171.);
+        assert_eq!(cleaned.len(), 2);
+        assert!(cleaned[1].contains("track_name=Song&"));
+    }
+    #[test]
+    fn retry_after_accepts_server_seconds_and_http_dates() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-02T02:00:00Z")
+            .unwrap()
+            .to_utc();
+        assert_eq!(parse_retry_after("1", now).unwrap().as_secs(), 1);
+        assert_eq!(
+            parse_retry_after("Mon, 02 Nov 2026 02:00:07 GMT", now)
+                .unwrap()
+                .as_secs(),
+            7
+        );
+        assert!(parse_retry_after("invalid", now).is_none());
+    }
     #[test]
     fn disk_cache_warms_memory_and_tolerates_small_duration_changes() {
         let path =
