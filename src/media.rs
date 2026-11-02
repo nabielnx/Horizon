@@ -52,13 +52,15 @@ impl Track {
         if self.lyrics.is_empty() {
             return None;
         }
-        let at = self.position_now() + 0.1;
+        let at = self.position_now();
         let idx = self.lyrics.partition_point(|line| line.at <= at);
-        Some(if idx == 0 {
-            0
+        let index = idx.checked_sub(1)?;
+        let line = &self.lyrics[index];
+        if line.end.is_some_and(|end| at >= end) || line.text.is_empty() {
+            None
         } else {
-            (idx - 1).min(self.lyrics.len() - 1)
-        })
+            Some(index)
+        }
     }
 }
 pub enum Command {
@@ -258,7 +260,7 @@ fn cover_retry_delay(attempt: u8) -> std::time::Duration {
         0..=10 => 250,
         11..=20 => 1000,
         21..=35 => 2500,
-        _ => 30000,
+        _ => 5000,
     })
 }
 
@@ -337,7 +339,14 @@ impl Media {
                     std::collections::VecDeque::with_capacity(4);
                 let (cover_jobs, cover_results) = cover_worker(state.clone(), events.clone());
                 let mut cover_pending = false;
+                let mut cover_refresh_requested = true;
+                let mut cover_recheck_at = None;
                 loop {
+                    if cover_recheck_at.is_some_and(|at: Instant| at <= Instant::now()) {
+                        cover_refresh_requested = true;
+                        next_cover = Instant::now();
+                        cover_recheck_at = Some(Instant::now() + Duration::from_secs(15));
+                    }
                     while let Ok(result) = cover_results.try_recv() {
                         cover_pending = false;
                         if let Ok(mut data) = state.lock()
@@ -345,13 +354,17 @@ impl Media {
                         {
                             match result.image {
                                 Ok((cover, palette)) => {
+                                    let changed =
+                                        data.cover.as_ref().is_none_or(|old| **old != *cover);
                                     cache_cover(
                                         &mut cover_cache,
                                         (result.key, cover.clone(), Some(palette)),
                                     );
                                     data.cover = Some(cover);
                                     data.palette = Some(palette);
-                                    data.cover_revision = data.cover_revision.wrapping_add(1);
+                                    if changed {
+                                        data.cover_revision = data.cover_revision.wrapping_add(1);
+                                    }
                                     data.cover_error.clear();
                                 }
                                 Err(error) => {
@@ -452,6 +465,9 @@ impl Media {
                                         if changed {
                                             cover_retries = 0;
                                             next_cover = Instant::now();
+                                            cover_refresh_requested = true;
+                                            cover_recheck_at =
+                                                Some(Instant::now() + Duration::from_secs(3));
                                         }
                                         let cached_entry = cover_cache
                                             .iter()
@@ -601,7 +617,14 @@ impl Media {
                                         data.lyrics = Arc::new(lines);
                                         data.lyrics_loaded = true;
                                         notify(&gui);
-                                    } else {
+                                    }
+                                    if data.lyrics.is_empty()
+                                        || crate::lyrics::needs_refresh(
+                                            &data.title,
+                                            &data.artist,
+                                            data.duration,
+                                        )
+                                    {
                                         let _ = lyric_jobs.send(crate::lyrics::Job {
                                             title: data.title.clone(),
                                             artist: data.artist.clone(),
@@ -618,7 +641,10 @@ impl Media {
                             let job = state
                                 .lock()
                                 .ok()
-                                .filter(|data| !data.title.is_empty() && data.cover.is_none())
+                                .filter(|data| {
+                                    !data.title.is_empty()
+                                        && (data.cover.is_none() || cover_refresh_requested)
+                                })
                                 .map(|data| CoverJob {
                                     key: track_cover_key(&data),
                                     session: session.clone(),
@@ -627,6 +653,7 @@ impl Media {
                                 && cover_jobs.try_send(job).is_ok()
                             {
                                 cover_pending = true;
+                                cover_refresh_requested = false;
                                 cover_retries = cover_retries.saturating_add(1);
                                 next_cover = Instant::now() + cover_retry_delay(cover_retries);
                                 if let Ok(mut data) = state.lock() {
@@ -649,6 +676,7 @@ impl Media {
                     match receive.recv_timeout(poll_timeout) {
                         Ok(Command::Refresh) => {
                             refresh = true;
+                            cover_refresh_requested = true;
                             next_cover = Instant::now();
                             cover_retries = 0;
                         }
@@ -756,6 +784,37 @@ impl Media {
 mod tests {
     use super::*;
     #[test]
+    fn lyric_selection_respects_exact_starts_ends_pause_and_seek() {
+        let mut track = Track {
+            duration: 10.,
+            position: 0.95,
+            lyrics: Arc::new(vec![
+                crate::lyrics::Line {
+                    at: 1.,
+                    end: Some(2.),
+                    text: "First".into(),
+                    ..Default::default()
+                },
+                crate::lyrics::Line {
+                    at: 3.,
+                    text: "Next".into(),
+                    ..Default::default()
+                },
+            ]),
+            ..Default::default()
+        };
+        assert_eq!(track.lyric_index(), None);
+        track.position = 1.;
+        assert_eq!(track.lyric_index(), Some(0));
+        track.position = 2.;
+        assert_eq!(track.lyric_index(), None);
+        track.position = 3.;
+        assert_eq!(track.lyric_index(), Some(1));
+        track.position = 1.5;
+        assert_eq!(track.lyric_index(), Some(0));
+        assert_eq!(track.position_now(), 1.5);
+    }
+    #[test]
     fn temporary_metadata_failure_keeps_the_same_players_cover_and_lyrics() {
         let state = Mutex::new(Track {
             source_app: "Player A".into(),
@@ -764,6 +823,7 @@ mod tests {
             lyrics: Arc::new(vec![crate::lyrics::Line {
                 at: 0.,
                 text: "Fixture line".into(),
+                ..Default::default()
             }]),
             ..Default::default()
         });
@@ -825,8 +885,8 @@ mod tests {
     }
     #[test]
     fn late_cover_retries_continue_slowly_and_invalid_images_are_rejected() {
-        assert_eq!(cover_retry_delay(36).as_secs(), 30);
-        assert_eq!(cover_retry_delay(255).as_secs(), 30);
+        assert_eq!(cover_retry_delay(36).as_secs(), 5);
+        assert_eq!(cover_retry_delay(255).as_secs(), 5);
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(
                 None,

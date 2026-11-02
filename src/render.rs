@@ -61,12 +61,20 @@ unsafe fn fonts(write: &IDWriteFactory) -> Result<IDWriteFontCollection> {
         }
     })
 }
+struct KaraokeLayout {
+    text: String,
+    width: u32,
+    style: (u16, u16, u8),
+    scroll: bool,
+    layout: IDWriteTextLayout,
+}
 pub struct Canvas {
     target: ID2D1RenderTarget,
     write: IDWriteFactory,
     fonts: IDWriteFontCollection,
     formats: RefCell<HashMap<(u16, bool, u8), IDWriteTextFormat>>,
     design_formats: RefCell<HashMap<(u16, u16, u8), IDWriteTextFormat>>,
+    karaoke_layout: RefCell<Option<KaraokeLayout>>,
     #[allow(clippy::type_complexity)]
     design_measurements: RefCell<std::collections::VecDeque<(String, u16, u16, u16, u8, f32, f32)>>,
     design_assets: RefCell<HashMap<&'static str, ID2D1Bitmap>>,
@@ -159,6 +167,7 @@ impl Canvas {
                 fonts,
                 formats: RefCell::new(HashMap::new()),
                 design_formats: RefCell::new(HashMap::new()),
+                karaoke_layout: RefCell::new(None),
                 design_measurements: RefCell::new(std::collections::VecDeque::new()),
                 design_assets: RefCell::new(HashMap::new()),
                 presented: Cell::new(false),
@@ -1710,7 +1719,13 @@ impl Canvas {
             }
         }
     }
-    pub unsafe fn compact_status(&self, b: (f32, f32, f32, f32), hover: f32) {
+    pub unsafe fn compact_status(
+        &self,
+        b: (f32, f32, f32, f32),
+        hover: f32,
+        battery: crate::power::Battery,
+        phase: f32,
+    ) {
         unsafe {
             self.ellipse(
                 b.0,
@@ -1743,9 +1758,54 @@ impl Canvas {
                 (7., 6.),
                 (9., 0.),
             ];
+            let mapped: Vec<_> = points
+                .iter()
+                .map(|v| (b.0 + 10. + v.0, b.1 + 7. + v.1))
+                .collect();
+            if battery.charging {
+                let alpha = (20. + 18. * (phase * 3.).sin().abs()) as u32;
+                self.ellipse(b.0 + 4., b.1 + 3., 24., 24., (alpha << 24) | 0x57fa65);
+            }
+            self.polygon(&mapped, 0x171b19);
+            if let Some(percent) = battery.percent {
+                let height = 16. * percent as f32 / 100.;
+                if height > 0. {
+                    self.push_design_clip((b.0 + 8., b.1 + 23. - height, 18., height));
+                    self.polygon(&mapped, 0x57fa65);
+                    self.pop_design_clip();
+                }
+            }
             for pair in points.windows(2) {
                 let p = |v: (f32, f32)| (b.0 + 10. + v.0, b.1 + 7. + v.1);
-                self.line(p(pair[0]), p(pair[1]), 0.85, 0xffffff);
+                self.line(
+                    p(pair[0]),
+                    p(pair[1]),
+                    0.85,
+                    if battery.percent.is_some() {
+                        0xc8eed3
+                    } else {
+                        0x929a96
+                    },
+                );
+            }
+            if battery.charging {
+                for (index, (x, y)) in [(6., 9.), (26., 7.), (25., 24.)].into_iter().enumerate() {
+                    let amount = (phase * 2.4 + index as f32 * 2.1).sin().max(0.);
+                    let radius = 0.4 + amount * 1.5;
+                    let point = (b.0 + x, b.1 + y);
+                    self.line(
+                        (point.0 - radius, point.1),
+                        (point.0 + radius, point.1),
+                        0.8,
+                        0xd3ffdc,
+                    );
+                    self.line(
+                        (point.0, point.1 - radius),
+                        (point.0, point.1 + radius),
+                        0.8,
+                        0xd3ffdc,
+                    );
+                }
             }
         }
     }
@@ -1927,6 +1987,140 @@ impl Canvas {
     pub unsafe fn pop_design_clip(&self) {
         unsafe {
             self.target.PopAxisAlignedClip();
+        }
+    }
+    pub unsafe fn design_karaoke(
+        &self,
+        line: &crate::lyrics::Line,
+        timing: (f64, f64),
+        b: (f32, f32, f32, f32),
+        style: (f32, u16, u8),
+        scroll: bool,
+    ) {
+        if line.text.is_empty() {
+            return;
+        }
+        unsafe {
+            let width_key = (b.2 * 10.).round() as u32;
+            let style_key = ((style.0 * 10.) as u16, style.1, style.2);
+            let layout = (|| -> Result<IDWriteTextLayout> {
+                let mut cache = self.karaoke_layout.borrow_mut();
+                if let Some(old) = &*cache
+                    && old.text == line.text
+                    && old.width == width_key
+                    && old.style == style_key
+                    && old.scroll == scroll
+                {
+                    return Ok(old.layout.clone());
+                }
+                let format =
+                    self.design_format((style.0, style.1, if scroll { 0 } else { style.2 }))?;
+                let layout = self.write.CreateTextLayout(
+                    &line.text.encode_utf16().collect::<Vec<_>>(),
+                    &format,
+                    if scroll { 10000. } else { b.2.max(1.) },
+                    10000.,
+                )?;
+                *cache = Some(KaraokeLayout {
+                    text: line.text.clone(),
+                    width: width_key,
+                    style: style_key,
+                    scroll,
+                    layout: layout.clone(),
+                });
+                Ok(layout)
+            })();
+            let Ok(layout) = layout else {
+                self.design_text(&line.text, b, style, 0xffffff);
+                return;
+            };
+            let mut metrics = DWRITE_TEXT_METRICS::default();
+            if layout.GetMetrics(&mut metrics).is_err() {
+                return;
+            }
+            let count = line.text.encode_utf16().count() as u32;
+            let units = line.sung_units(timing.0, timing.1).clamp(0., count as f32);
+            let mut hit = DWRITE_HIT_TEST_METRICS::default();
+            let (mut caret_x, mut caret_y) = (0., 0.);
+            if layout
+                .HitTestTextPosition(
+                    (units.floor() as u32).min(count.saturating_sub(1)),
+                    false,
+                    &mut caret_x,
+                    &mut caret_y,
+                    &mut hit,
+                )
+                .is_err()
+            {
+                return;
+            }
+            let fraction =
+                ((units - hit.textPosition as f32) / hit.length.max(1) as f32).clamp(0., 1.);
+            let caret = hit.left + hit.width * fraction;
+            let offset = if scroll {
+                crate::layout::karaoke_scroll(caret, metrics.widthIncludingTrailingWhitespace, b.2)
+            } else {
+                0.
+            };
+            let center = if scroll && matches!(style.2, 1 | 2) {
+                ((b.2 - metrics.widthIncludingTrailingWhitespace) / 2.).max(0.)
+            } else {
+                0.
+            };
+            let origin = windows_numerics::Vector2 {
+                X: b.0 + center - offset,
+                Y: b.1,
+            };
+            self.push_design_clip(b);
+            if let Ok(brush) = self.brush(0x828b98) {
+                self.target
+                    .DrawTextLayout(origin, &layout, &brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
+            }
+            if units > 0.
+                && let Ok(brush) = self.brush(0xffffff)
+            {
+                let mut regions = Vec::new();
+                if hit.textPosition > 0 {
+                    let mut needed = 0;
+                    let _ = layout.HitTestTextRange(0, hit.textPosition, 0., 0., None, &mut needed);
+                    if needed <= 256 {
+                        regions.resize(needed as usize, DWRITE_HIT_TEST_METRICS::default());
+                        if layout
+                            .HitTestTextRange(
+                                0,
+                                hit.textPosition,
+                                0.,
+                                0.,
+                                Some(&mut regions),
+                                &mut needed,
+                            )
+                            .is_err()
+                        {
+                            regions.clear();
+                        }
+                    }
+                }
+                if fraction > 0. {
+                    hit.width *= fraction;
+                    regions.push(hit);
+                }
+                for region in regions {
+                    self.push_design_clip((
+                        origin.X + region.left,
+                        origin.Y + region.top,
+                        region.width,
+                        region.height,
+                    ));
+                    self.target.DrawTextLayout(
+                        origin,
+                        &layout,
+                        &brush,
+                        D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    );
+                    self.pop_design_clip();
+                }
+            }
+            self.pop_design_clip();
         }
     }
     pub unsafe fn design_text(
@@ -2644,6 +2838,103 @@ pub fn wave_height(x: f64, span: f64, phase: f64, back: bool) -> f64 {
 #[cfg(test)]
 mod waveform_tests {
     use super::*;
+    #[test]
+    fn compact_battery_fill_uses_the_reported_percentage() {
+        unsafe {
+            let mut counts = Vec::new();
+            for percent in [0, 50, 100] {
+                let canvas = Canvas::image(80, 50).unwrap();
+                canvas.target.BeginDraw();
+                canvas.target.Clear(Some(&color(0x000000)));
+                canvas.compact_status(
+                    (20., 10., 32., 30.),
+                    0.,
+                    crate::power::Battery {
+                        percent: Some(percent),
+                        charging: false,
+                    },
+                    0.,
+                );
+                canvas.target.EndDraw(None, None).unwrap();
+                let mut pixels = vec![0; 80 * 50 * 4];
+                canvas
+                    .bitmap
+                    .as_ref()
+                    .unwrap()
+                    .CopyPixels(std::ptr::null(), 80 * 4, &mut pixels)
+                    .unwrap();
+                counts.push(
+                    pixels
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .filter(|p| {
+                            p[1] as i16 - p[0] as i16 > 60 && p[1] as i16 - p[2] as i16 > 60
+                        })
+                        .count(),
+                );
+            }
+            assert_eq!(counts[0], 0);
+            assert!(counts[1] > 0 && counts[2] > counts[1]);
+        }
+    }
+    #[test]
+    fn karaoke_ink_advances_and_stays_inside_wrapped_and_idle_viewports() {
+        unsafe {
+            let line = crate::lyrics::Line {
+                at: 0.,
+                end: Some(8.),
+                text: "A long lyric that must remain inside its own reading area while it moves"
+                    .into(),
+                ..Default::default()
+            };
+            for scroll in [false, true] {
+                let canvas = Canvas::image(240, 180).unwrap();
+                let mut bright = Vec::new();
+                for position in [0., 4., 8.] {
+                    canvas.target.BeginDraw();
+                    canvas.target.Clear(Some(&color(0x000000)));
+                    canvas.design_karaoke(
+                        &line,
+                        (position, 8.),
+                        (20., 10., 175., 150.),
+                        (15., 700, 2),
+                        scroll,
+                    );
+                    canvas.target.EndDraw(None, None).unwrap();
+                    let mut pixels = vec![0; 240 * 180 * 4];
+                    canvas
+                        .bitmap
+                        .as_ref()
+                        .unwrap()
+                        .CopyPixels(std::ptr::null(), 240 * 4, &mut pixels)
+                        .unwrap();
+                    let mut count = 0;
+                    for y in 0..180 {
+                        for x in 0..240 {
+                            let pixel = &pixels[(y * 240 + x) * 4..(y * 240 + x) * 4 + 3];
+                            if pixel.iter().all(|v| *v > 210) {
+                                count += 1;
+                            }
+                            if !(20..195).contains(&x) || !(10..160).contains(&y) {
+                                assert!(
+                                    pixel.iter().all(|v| *v <= 2),
+                                    "Lyric escaped its viewport"
+                                );
+                            }
+                        }
+                    }
+                    bright.push(count);
+                }
+                assert_eq!(bright[0], 0);
+                assert!(bright[1] > 0);
+                assert!(bright[2] > 0);
+                if !scroll {
+                    assert!(bright[2] > bright[1]);
+                }
+            }
+        }
+    }
     #[test]
     fn tinted_idle_wave_does_not_pass_the_playhead_at_track_start() {
         unsafe {

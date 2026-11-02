@@ -58,6 +58,26 @@ than the ignored `artifacts` directory as a source dependency.
 
 ## Verification limits
 
+`Horizon.exe --inspect-running-media` asks the already running instance to write
+`artifacts/running-media-diagnostics.json`. It reads existing state without
+controlling playback or starting lyric lookups. This is useful for intermittent
+cover failures that do not reproduce in a fresh `--media-probe` process.
+
+Karaoke uses Lyricsfile 1.0 word timestamps when provided by LRCLIB. Records with
+only line timestamps use an interpolated sweep between line boundaries, which
+cannot establish true word timing. Long idle lyrics scroll using the highlighted
+glyph position from DirectWrite rather than an independent elapsed-time loop.
+Legacy lyric caches remain readable and are refreshed in the background; failed
+refreshes preserve existing lyrics. Offscreen pixel tests cover wrapping and
+viewport clipping, without saving screenshots.
+
+Compact battery status is read from Windows' `GetSystemPowerStatus`; unknown or
+absent batteries have no invented percentage. `WM_POWERBROADCAST` updates it on
+power changes with a five-second fallback refresh. Charging uses the shared UI
+frame clock rather than a new polling/animation thread. Unit tests simulate
+absent, unknown, charging, discharging and full battery reports; actual hardware
+plug/unplug behavior still needs manual validation.
+
 Read-only media diagnostics (no player controls or lyric network requests):
 
 ```powershell

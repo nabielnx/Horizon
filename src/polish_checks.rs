@@ -221,6 +221,7 @@ pub(super) unsafe fn run(hwnd: HWND, w: &mut Window) -> Result<()> {
             t.lyrics=std::sync::Arc::new((0..18).map(|i|lyrics::Line {
                 at:i as f64*10.,
                 text:if i%3==0 {"Kita masih punya waktu untuk kembali menemukan arah, berjalan perlahan dan menyelesaikan cerita ini bersama".into()}else{format!("Langkah {} membawa kita pulang",i+1)},
+                ..Default::default()
             }).collect());
         }
         w.page = 0;
@@ -255,6 +256,7 @@ pub(super) unsafe fn run(hwnd: HWND, w: &mut Window) -> Result<()> {
             track.lyrics = std::sync::Arc::new(vec![lyrics::Line {
                 at: 0.,
                 text: "I loved You".into(),
+                ..Default::default()
             }]);
             track.position = 86.4;
         }
@@ -275,6 +277,7 @@ pub(super) unsafe fn run(hwnd: HWND, w: &mut Window) -> Result<()> {
                 track.lyrics = std::sync::Arc::new(vec![lyrics::Line {
                     at: 0.,
                     text: "But for u i leave anything behind".into(),
+                    ..Default::default()
                 }]);
             }
             paint(w, 591)?;

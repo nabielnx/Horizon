@@ -18,13 +18,8 @@ impl Window {
                 .unwrap_or_default();
             if !self.settings {
                 let key = format!(
-                    "{}|{}|{:?}|{}|{}|{}",
-                    track.title,
-                    track.artist,
-                    track.lyric_index(),
-                    s.show_lyrics,
-                    track.playing,
-                    track.cover_revision
+                    "{}|{}|{}|{}|{}",
+                    track.title, track.artist, s.show_lyrics, track.playing, track.cover_revision
                 );
                 if s.motion
                     && !(self.offscreen && std::env::args().any(|a| a == "--render"))

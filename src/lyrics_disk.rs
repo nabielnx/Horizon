@@ -6,6 +6,8 @@ const LIMIT: usize = 2 * 1024 * 1024;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct Record {
+    #[serde(default)]
+    pub format_version: u8,
     pub title: String,
     pub artist: String,
     pub duration: u64,
@@ -33,9 +35,19 @@ pub(super) fn read(path: &Path) -> Vec<Record> {
                 && r.duration > 0
                 && !r.lines.is_empty()
                 && r.lines.len() <= 2048
-                && r.lines
-                    .iter()
-                    .all(|l| l.at.is_finite() && l.at >= 0. && l.text.len() <= 4096)
+                && r.lines.iter().all(|l| {
+                    l.at.is_finite()
+                        && l.at >= 0.
+                        && l.text.len() <= 4096
+                        && l.end.is_none_or(|end| end.is_finite() && end >= l.at)
+                        && l.words.len() <= 1024
+                        && l.words.iter().all(|w| {
+                            w.at.is_finite()
+                                && w.at >= l.at
+                                && w.text.len() <= 4096
+                                && w.end.is_none_or(|end| end.is_finite() && end >= w.at)
+                        })
+                })
         });
         if rows.len() > 32 {
             rows.drain(..rows.len() - 32);
@@ -90,6 +102,7 @@ mod tests {
         let path =
             std::env::temp_dir().join(format!("horizon-lyrics-disk-{}.json", std::process::id()));
         let row = Record {
+            format_version: 2,
             title: "Fixture".into(),
             artist: "Artist".into(),
             duration: 200,
@@ -97,6 +110,7 @@ mod tests {
             lines: vec![Line {
                 at: 0.,
                 text: "Fixture line".into(),
+                ..Default::default()
             }],
         };
         let mut missing = row.clone();

@@ -2,6 +2,33 @@
 //! control the user's media player or desktop.
 use crate::*;
 
+pub(super) fn running_media_diagnostics(window: &Window) -> Result<()> {
+    let state = window.shared.borrow();
+    let track = state
+        .media
+        .as_ref()
+        .and_then(|media| media.snapshot.lock().ok().map(|track| track.clone()))
+        .unwrap_or_default();
+    let report = serde_json::json!({
+        "pid": std::process::id(), "readOnly": true, "liveInstance": true,
+        "source": track.source_app, "title": track.title, "artist": track.artist,
+        "position": track.position_now(), "duration": track.duration,
+        "coverBytes": track.cover.as_ref().map_or(0, |bytes| bytes.len()),
+        "coverError": track.cover_error, "coverAttempts": track.cover_attempts,
+        "coverRevision": track.cover_revision, "error": track.error,
+        "coverRenderError": window.cover_render_error.borrow().as_str(),
+        "batteryPercent": window.battery.percent, "batteryCharging": window.battery.charging,
+        "lyricLines": track.lyrics.len(), "wordTimedLines": track.lyrics.iter().filter(|line| !line.words.is_empty()).count()
+    });
+    std::fs::create_dir_all("artifacts").map_err(|e| Error::new(E_FAIL, e.to_string()))?;
+    std::fs::write(
+        "artifacts/running-media-diagnostics.json",
+        serde_json::to_vec_pretty(&report).map_err(|e| Error::new(E_FAIL, e.to_string()))?,
+    )
+    .map_err(|e| Error::new(E_FAIL, e.to_string()))?;
+    Ok(())
+}
+
 pub(super) fn media_diagnostics() -> Result<()> {
     let lyrics_network = std::env::args().any(|a| a == "--lyrics-network");
     let media = media::Media::start(lyrics_network);

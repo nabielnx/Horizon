@@ -21,5 +21,9 @@ Rust dependency versions are recorded in `Cargo.lock`; their licenses remain
 with the upstream packages. Optional PNG conversion uses `@resvg/resvg-js`
 (MPL-2.0), which is not included in the application runtime or release bundle.
 
+Lyricsfile parsing uses `serde_yaml_ng` (MIT OR Apache-2.0) and its dependencies;
+see the exact versions in `Cargo.lock`. Lyrics and their timing data remain
+runtime content supplied by the lyric provider.
+
 Release packages include this file, the application license, icon license and
 font licenses. Review dependency terms when changing dependencies/distribution.

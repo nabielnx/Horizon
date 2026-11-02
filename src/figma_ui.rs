@@ -23,10 +23,23 @@ fn idle_lyric(track: &media::Track, enabled: bool) -> &str {
         line.text.as_str()
     } else if track.title.is_empty() {
         "Horizon"
+    } else if !track.lyrics.is_empty() {
+        ""
     } else if !track.lyrics_loaded {
         "Menunggu lirik"
     } else {
         "Lirik belum tersedia"
+    }
+}
+fn compact_page(alert: Option<usize>, focusing: bool, playing: bool, last_page: usize) -> usize {
+    if let Some(page) = alert {
+        page.min(5)
+    } else if focusing {
+        1
+    } else if playing {
+        0
+    } else {
+        last_page.min(5)
     }
 }
 
@@ -94,6 +107,24 @@ unsafe fn label(c: &Canvas, text: &str, b: (f32, f32, f32), style: (f32, u16, u3
 }
 
 impl Window {
+    unsafe fn figma_lyric(
+        &self,
+        c: &Canvas,
+        track: &media::Track,
+        enabled: bool,
+        b: (f32, f32, f32, f32),
+        style: (f32, u16, u8),
+    ) {
+        unsafe {
+            if enabled && let Some(index) = track.lyric_index() {
+                let line = &track.lyrics[index];
+                let end = track.lyrics.get(index + 1).map_or(track.duration, |l| l.at);
+                c.design_karaoke(line, (track.position_now(), end), b, style, true);
+            } else {
+                c.design_text(idle_lyric(track, enabled), b, style, 0xffffff);
+            }
+        }
+    }
     fn figma_transform(&self) -> (f32, f32) {
         let width = self.shared.borrow().data.settings.width as f32;
         if self.expanded && self.page >= 3 {
@@ -337,19 +368,73 @@ impl Window {
                     }
                     // The supplied compact reference has a 29px music plate,
                     // separate from the shell contour applied by the window region.
-                    asset(c, "nav-music", (left + 24., 10., 29., 29.));
+                    let paused_focus = state.data.focus_remaining.is_some()
+                        && state.focus_left > 0
+                        && state.focus_left < s.focus_minutes as u64 * 60;
+                    let context = compact_page(
+                        state.alert.as_ref().map(|a| a.page),
+                        state.running.is_some() || paused_focus,
+                        track.playing,
+                        self.page,
+                    );
+                    let icon_bounds = (left + 24., 10., 29., 29.);
+                    let cover_drawn = context == 0
+                        && track.cover.as_ref().is_some_and(|bytes| {
+                            c.cover_rect(
+                                &format!(
+                                    "{}|{}|{}",
+                                    track.title, track.artist, track.cover_revision
+                                ),
+                                bytes,
+                                icon_bounds,
+                                8.,
+                            )
+                            .is_ok()
+                        });
+                    if !cover_drawn {
+                        mono_badge(
+                            c,
+                            [
+                                "music-notes",
+                                "timer",
+                                "calendar-dots",
+                                "drop",
+                                "list-checks",
+                                "files",
+                            ][context],
+                            icon_bounds,
+                        );
+                    }
                     c.outline(left + 24.35, 10.35, 28.3, 28.3, 9.1, 0x999999);
-                    let lyric = idle_lyric(&track, s.show_lyrics);
-                    let caption = state
-                        .alert
-                        .as_ref()
-                        .map(|a| a.text.as_str())
-                        .unwrap_or(lyric);
-                    label(c, caption, (left + 70., 11., 175.), (12., 700, 0xffffff, 1));
+                    if let Some(alert) = &state.alert {
+                        label(
+                            c,
+                            &alert.text,
+                            (left + 70., 11., 175.),
+                            (12., 700, 0xffffff, 1),
+                        );
+                    } else {
+                        self.figma_lyric(
+                            c,
+                            &track,
+                            s.show_lyrics,
+                            (left + 70., 11., 175., 21.),
+                            (12., 700, 1),
+                        );
+                    }
                     self.figma_idle_wave(c, state, &track, (left + 70., 29., 175., 12.));
                     let b = (left + 257., 9., 32., 30.);
                     let hover = c.hover_amount(b, self.figma_hover(b));
-                    c.compact_status(b, hover);
+                    c.compact_status(
+                        b,
+                        hover,
+                        self.battery,
+                        if s.motion {
+                            self.battery_phase.elapsed().as_secs_f32()
+                        } else {
+                            0.
+                        },
+                    );
                     self.figma_hit(b, Action::OpenAlert);
                     self.figma_hit((left, 0., 310., 50.), Action::OpenAlert);
                 } else if track.playing {
@@ -360,8 +445,13 @@ impl Window {
                     label(c, &track.title, (108., 22., 160.), (16., 600, 0xffffff, 0));
                     label(c, &track.artist, (108., 50., 160.), (12., 600, 0xffffff, 0));
                     c.rect(276., 30., 1., 41., 0., 0x434343);
-                    let caption = idle_lyric(&track, s.show_lyrics);
-                    label(c, caption, (292., 27., 196.), (11.5, 600, 0xffffff, 0));
+                    self.figma_lyric(
+                        c,
+                        &track,
+                        s.show_lyrics,
+                        (292., 27., 196., 20.),
+                        (11.5, 600, 0),
+                    );
                     self.figma_idle_wave(c, state, &track, (292., 49., 196., 12.));
                     label(
                         c,
@@ -406,13 +496,22 @@ impl Window {
     unsafe fn figma_cover(&self, c: &Canvas, track: &media::Track, b: (f32, f32, f32, f32)) {
         unsafe {
             let drawn = track.cover.as_ref().is_some_and(|bytes| {
-                c.cover_rect(
+                let result = c.cover_rect(
                     &format!("{}|{}|{}", track.title, track.artist, track.cover_revision),
                     bytes,
                     b,
                     13.,
-                )
-                .is_ok()
+                );
+                match result {
+                    Ok(()) => {
+                        self.cover_render_error.borrow_mut().clear();
+                        true
+                    }
+                    Err(error) => {
+                        *self.cover_render_error.borrow_mut() = error.to_string();
+                        false
+                    }
+                }
             });
             if !drawn {
                 c.rect(b.0, b.1, b.2, b.3, 13., 0x232323);
@@ -583,7 +682,11 @@ impl Window {
             }
             c.rect(365., 25., 1., 230., 0.5, 0x343a43);
             if state.data.settings.show_lyrics && !track.lyrics.is_empty() {
-                let current = track.lyric_index().unwrap_or(0);
+                let active_index = track.lyric_index();
+                let current = track
+                    .lyrics
+                    .partition_point(|line| line.at <= track.position_now())
+                    .saturating_sub(1);
                 let start = current.saturating_sub(14);
                 let end = (current + 15).min(track.lyrics.len());
                 let bounds = (
@@ -601,7 +704,7 @@ impl Window {
                 }
                 let heights: Vec<f32> = (start..end)
                     .map(|index| {
-                        let active = index == current;
+                        let active = active_index == Some(index);
                         let size = if active { active_size } else { 11.5 };
                         c.design_measure(
                             &track.lyrics[index].text,
@@ -617,22 +720,36 @@ impl Window {
                 c.push_design_clip(bounds);
                 for row in rows {
                     let index = start + row.index;
-                    let active = index == current;
+                    let active = active_index == Some(index);
                     let distance = index.abs_diff(current).saturating_sub(1) as f32;
-                    c.design_text(
-                        &track.lyrics[index].text,
-                        (bounds.0, row.y, bounds.2, row.height),
-                        (
-                            if active { active_size } else { 11.5 },
-                            if active { 700 } else { 400 },
-                            2,
-                        ),
-                        if active {
-                            0xffffff
-                        } else {
-                            motion::mix(0xa8b0bc, 0x68717e, distance / 5.)
-                        },
-                    );
+                    if active {
+                        let end = track
+                            .lyrics
+                            .get(index + 1)
+                            .map_or(track.duration, |line| line.at);
+                        c.design_karaoke(
+                            &track.lyrics[index],
+                            (track.position_now(), end),
+                            (bounds.0, row.y, bounds.2, row.height),
+                            (active_size, 700, 2),
+                            false,
+                        );
+                    } else {
+                        c.design_text(
+                            &track.lyrics[index].text,
+                            (bounds.0, row.y, bounds.2, row.height),
+                            (
+                                if active { active_size } else { 11.5 },
+                                if active { 700 } else { 400 },
+                                2,
+                            ),
+                            if active {
+                                0xffffff
+                            } else {
+                                motion::mix(0xa8b0bc, 0x68717e, distance / 5.)
+                            },
+                        );
+                    }
                 }
                 c.pop_design_clip();
             } else {
@@ -1132,5 +1249,15 @@ impl Window {
             self.figma_peek_playback(c, track);
             self.figma_hit((20., 8., 260., 80.), Action::OpenAlert);
         }
+    }
+}
+#[cfg(test)]
+mod compact_context_tests {
+    #[test]
+    fn alerts_then_focus_take_priority_over_background_music() {
+        assert_eq!(super::compact_page(Some(3), true, true, 0), 3);
+        assert_eq!(super::compact_page(None, true, true, 0), 1);
+        assert_eq!(super::compact_page(None, false, true, 2), 0);
+        assert_eq!(super::compact_page(None, false, false, 2), 2);
     }
 }

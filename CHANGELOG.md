@@ -2,6 +2,18 @@
 
 ## 0.3.0 — Unreleased
 
+- Compact artwork/icon follows the active context (reminder, focus session,
+  music, or the last page). The right lightning shows Windows battery charge
+  as a green fill, with glow/sparks only while Windows reports charging.
+
+- Karaoke highlighting uses Lyricsfile word timestamps when available, with a
+  line-timed sweep fallback. Long compact/medium lyrics follow the sung glyph
+  inside their viewport; pause and seek use the media timeline directly.
+- Recheck artwork after media-property events, shortly after a track change,
+  and periodically to recover late thumbnails without discarding valid artwork.
+- Add opt-in diagnostics for the actual running instance, including thumbnail
+  acquisition errors and cover-render failures.
+
 - First hover opens the medium view directly from the hidden indicator, with
   geometry starting at the actual visible bounds; a click opens the large panel.
 - Cover retrieval uses a separate bounded worker, partial stream reads and

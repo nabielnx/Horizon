@@ -110,6 +110,12 @@ pub(super) fn frame_interval(w: &Window) -> Option<Duration> {
         } else {
             Duration::from_millis(250)
         })
+    } else if state.data.settings.motion
+        && !w.expanded
+        && w.mode == shell_policy::Mode::Compact
+        && w.battery.charging
+    {
+        Some(Duration::from_millis(33))
     } else {
         None
     }

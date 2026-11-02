@@ -15,6 +15,7 @@ mod media;
 mod model;
 mod motion;
 mod polish_checks;
+mod power;
 mod probes;
 mod reminders;
 mod render;
@@ -167,6 +168,10 @@ struct Window {
     hover_tick: Option<Instant>,
     mode: shell_policy::Mode,
     idle_transition: Option<shell_policy::Transition>,
+    cover_render_error: RefCell<String>,
+    battery: power::Battery,
+    battery_checked: Instant,
+    battery_phase: Instant,
     last_policy_check: Instant,
     page: usize,
     hits: Vec<Hit>,
@@ -1564,6 +1569,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             let _ = InvalidateRect(Some(hwnd), None, false);
             LRESULT(0)
         }
+        m if m == WM_APP + 12 => {
+            let _ = probes::running_media_diagnostics(w);
+            LRESULT(0)
+        }
         m if m == WM_APP + 10 => {
             if w.expanded {
                 w.expanded = false;
@@ -1692,6 +1701,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             record_focus(&mut s);
             let minute = Local::now().timestamp() / 60;
             let mut changed = (w.expanded && w.page == 0) || minute != w.minute;
+            if !w.settings && !w.offscreen && w.battery_checked.elapsed().as_secs() >= 5 {
+                w.battery_checked = Instant::now();
+                if let Some(battery) = power::Battery::read()
+                    && battery != w.battery
+                {
+                    w.battery = battery;
+                    changed = true;
+                }
+            }
             w.minute = minute;
             s.data.reset_day();
             if s.running.is_some() {
@@ -1736,6 +1754,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 let _ = InvalidateRect(Some(hwnd), None, false);
             }
             LRESULT(0)
+        }
+        WM_POWERBROADCAST => {
+            if !w.settings
+                && !w.offscreen
+                && let Some(battery) = power::Battery::read()
+            {
+                w.battery = battery;
+                w.battery_checked = Instant::now();
+                let _ = InvalidateRect(Some(hwnd), None, false);
+            }
+            LRESULT(1)
         }
         WM_CLOSE => {
             if w.settings {
@@ -1802,6 +1831,14 @@ unsafe fn create(shared: Rc<RefCell<Shared>>, settings: bool, offscreen: bool) -
         hover_tick: None,
         mode: shell_policy::Mode::Compact,
         idle_transition: None,
+        cover_render_error: RefCell::new(String::new()),
+        battery: if offscreen {
+            power::Battery::default()
+        } else {
+            power::Battery::read().unwrap_or_default()
+        },
+        battery_checked: Instant::now(),
+        battery_phase: Instant::now(),
         last_policy_check: Instant::now(),
         page: if settings { 0 } else { 1 },
         hits: vec![],
@@ -2046,6 +2083,13 @@ impl Drop for Instance {
     }
 }
 fn run() -> Result<()> {
+    if std::env::args().any(|arg| arg == "--inspect-running-media") {
+        unsafe {
+            let hwnd = FindWindowW(w!("Horizon.Native"), w!("Horizon"))?;
+            PostMessageW(Some(hwnd), WM_APP + 12, WPARAM(0), LPARAM(0))?;
+        }
+        return Ok(());
+    }
     if std::env::args().any(|a| a == "--media-probe") {
         return probes::media_diagnostics();
     }

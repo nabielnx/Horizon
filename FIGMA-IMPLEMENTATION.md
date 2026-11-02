@@ -12,7 +12,21 @@ The user requested a shorter expanded panel ending below the music transport con
 
 `src/figma_ui.rs` renders compact, both peek states, Music, Focus and Calendar natively. Water, Tasks and Shelf retain their feature rendering and adapt to the common 280 px height. The Win32 region and backing target use the same expanded height. Page icons are white on neutral glass plates; the first six sidebar pages scroll smoothly and Settings stays pinned. Task, water, calendar and focus data accents remain distinct from glyph colours.
 
-Compact displays the synchronized active lyric centered over the timeline. Alerts take precedence; missing lyrics show loading/unavailable status. It uses the original smooth Samsung-style two-layer wave with cover-derived colour and 1.8× its original motion speed. Played width and playhead share one progress value, with no artificial minimum width. Pause freezes phase; disabling motion remains static. The right outlined bolt is white and opens the panel; it is not a battery indicator.
+Compact displays the synchronized active lyric centered over the timeline. Alerts take precedence; missing lyrics show loading/unavailable status. It uses the original smooth Samsung-style two-layer wave with cover-derived colour and 1.8× its original motion speed. Played width and playhead share one progress value, with no artificial minimum width. Pause freezes phase; disabling motion remains static.
+
+The compact left plate follows reminders, an active/paused focus session,
+playing music, then the last selected page, in that priority order. Music uses
+the actual cover when available; other contexts use neutral plates/white glyphs.
+The right lightning is now a battery indicator: green fill follows Windows'
+reported percentage, while glow/sparks are enabled only when charging is
+reported. Unknown or absent batteries stay neutral. Power notifications refresh
+the state promptly, backed by a five-second status check; charging animation
+reuses the existing frame clock at 30 Hz when music does not need faster frames.
+
+Active lyric text uses a glyph-based karaoke sweep. Word timings come from
+Lyricsfile 1.0 when available; line-only records use interpolation between line
+boundaries. Compact/medium overflow follows the highlighted glyph, so pause,
+seek and track changes control the text position rather than a looping marquee.
 
 Startup visibility is resolved before the first presentation. Hover from the
 hidden indicator opens the medium view directly; its first content frame uses
