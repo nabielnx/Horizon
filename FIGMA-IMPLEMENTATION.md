@@ -14,19 +14,27 @@ The user requested a shorter expanded panel ending below the music transport con
 
 Compact displays the synchronized active lyric centered over the timeline. Alerts take precedence; missing lyrics show loading/unavailable status. It uses the original smooth Samsung-style two-layer wave with cover-derived colour and 1.8× its original motion speed. Played width and playhead share one progress value, with no artificial minimum width. Pause freezes phase; disabling motion remains static.
 
-The compact left plate follows reminders, an active/paused focus session,
-playing music, then the last selected page, in that priority order. Music uses
+The compact left plate follows the most recently started/resumed focus or music
+activity. A fresh reminder can show its icon, but a pending reminder never locks
+out a later activation. Pausing that activity falls back to
+the other running activity; metadata/automatic song changes do not claim
+ownership. With no running activity, it uses the last selected page. Music uses
 the actual cover when available; other contexts use neutral plates/white glyphs.
 The right lightning is now a battery indicator: green fill follows Windows'
-reported percentage, while glow/sparks are enabled only when charging is
-reported. Unknown or absent batteries stay neutral. Power notifications refresh
-the state promptly, backed by a five-second status check; charging animation
+reported percentage, while glow/sparks indicate a connected adapter even when
+the battery is not accepting current. Unknown or absent batteries stay neutral.
+An AC power setting subscription refreshes the state promptly, backed by a
+one-second status check. Known plug/unplug transitions show a 3.2-second notice
+inside Horizon without adding reminders to the user's queue. Adapter animation
 reuses the existing frame clock at 30 Hz when music does not need faster frames.
 
 Active lyric text uses a glyph-based karaoke sweep. Word timings come from
 Lyricsfile 1.0 when available; line-only records use interpolation between line
 boundaries. Compact/medium overflow follows the highlighted glyph, so pause,
 seek and track changes control the text position rather than a looping marquee.
+
+The played rail uses the same colour as the front wave, and the unplayed rail
+uses a dim shade of that cover tint, across compact, medium and expanded music.
 
 Startup visibility is resolved before the first presentation. Hover from the
 hidden indicator opens the medium view directly; its first content frame uses

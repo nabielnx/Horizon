@@ -72,11 +72,19 @@ refreshes preserve existing lyrics. Offscreen pixel tests cover wrapping and
 viewport clipping, without saving screenshots.
 
 Compact battery status is read from Windows' `GetSystemPowerStatus`; unknown or
-absent batteries have no invented percentage. `WM_POWERBROADCAST` updates it on
-power changes with a five-second fallback refresh. Charging uses the shared UI
+absent batteries have no invented percentage. AC adapter connection and actual
+charging current are separate states: a connected adapter can have no charging
+current, for example while holding a device charge limit. The lightning effect
+uses adapter connection; diagnostics retain both fields.
+
+An explicit `GUID_ACDC_POWER_SOURCE` registration receives `WM_POWERBROADCAST`
+updates, with a one-second fallback refresh. Known plug/unplug edges show a
+3.2-second in-app notice; initial unknown readings and capacity changes do not
+create false notices. Adapter animation uses the shared UI
 frame clock rather than a new polling/animation thread. Unit tests simulate
 absent, unknown, charging, discharging and full battery reports; actual hardware
-plug/unplug behavior still needs manual validation.
+plug/unplug behavior still needs manual validation. Diagnostics include power
+event registration, connection transition counts and current compact context.
 
 Read-only media diagnostics (no player controls or lyric network requests):
 

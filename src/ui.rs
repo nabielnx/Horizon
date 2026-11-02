@@ -17,6 +17,9 @@ impl Window {
                 .and_then(|m| m.snapshot.lock().ok().map(|t| t.clone()))
                 .unwrap_or_default();
             if !self.settings {
+                self.compact_activity
+                    .observe_track(&track, state.running.is_some());
+                self.compact_activity.observe_alert(state.alert.as_ref());
                 let key = format!(
                     "{}|{}|{}|{}|{}",
                     track.title, track.artist, s.show_lyrics, track.playing, track.cover_revision
@@ -60,6 +63,19 @@ impl Window {
             if let Some(overlay) = &self.overlay {
                 let t = (overlay.started.elapsed().as_secs_f32() / overlay.duration).clamp(0., 1.);
                 c.overlay(&overlay.bitmap, 1. - motion::ease(t), overlay.shell);
+            }
+            if !self.settings
+                && (self.expanded || self.mode == shell_policy::Mode::Peek)
+                && let Some(notice) = &self.power_notice
+            {
+                let x = (s.width as f32 - 240.) / 2.;
+                c.rect(x, 1., 240., 18., 8., 0x202823);
+                c.design_text(
+                    &notice.text(),
+                    (x + 5., 1., 230., 18.),
+                    (10., 600, 1),
+                    0xffffff,
+                );
             }
             if let Some(h) = self.focused.and_then(|i| self.hits.get(i)) {
                 c.outline(

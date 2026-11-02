@@ -2,9 +2,18 @@
 
 ## 0.3.0 — Unreleased
 
-- Compact artwork/icon follows the active context (reminder, focus session,
-  music, or the last page). The right lightning shows Windows battery charge
-  as a green fill, with glow/sparks only while Windows reports charging.
+- Played music rails use the front waveform colour in compact, medium and
+  expanded views; the remaining rail uses a dim shade of the same cover tint.
+
+- Compact focus/music ownership follows the latest start/resume action; pausing
+  an activity falls back to another running activity instead of locking focus.
+  Brief metadata gaps and already-pending reminders do not steal that ownership.
+- Adapter connection is tracked independently from charging current, including
+  devices that hold a charge limit. Plug/unplug shows a short in-app notice and
+  updates lightning effects through an explicit AC power event subscription.
+
+- Compact artwork/icon follows the active context. The right lightning shows
+  Windows battery charge as green fill and adapter connection as glow/sparks.
 
 - Karaoke highlighting uses Lyricsfile word timestamps when available, with a
   line-timed sweep fallback. Long compact/medium lyrics follow the sung glyph

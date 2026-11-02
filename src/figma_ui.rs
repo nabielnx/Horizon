@@ -31,15 +31,74 @@ fn idle_lyric(track: &media::Track, enabled: bool) -> &str {
         "Lirik belum tersedia"
     }
 }
-fn compact_page(alert: Option<usize>, focusing: bool, playing: bool, last_page: usize) -> usize {
-    if let Some(page) = alert {
-        page.min(5)
-    } else if focusing {
-        1
-    } else if playing {
-        0
-    } else {
-        last_page.min(5)
+#[derive(Default)]
+pub(super) struct CompactActivity {
+    owner: Option<usize>,
+    playing: bool,
+    focusing: bool,
+    media_gap: Option<Instant>,
+    last_alert: Option<(usize, String)>,
+    alert_after_activity: bool,
+}
+impl CompactActivity {
+    pub fn observe_alert(&mut self, alert: Option<&Alert>) {
+        let same = match (&self.last_alert, alert) {
+            (Some((page, text)), Some(alert)) => *page == alert.page && *text == alert.text,
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            self.last_alert = alert.map(|alert| (alert.page, alert.text.clone()));
+            self.alert_after_activity = alert.is_some();
+        }
+    }
+    pub fn observe_track(&mut self, track: &media::Track, focusing: bool) {
+        // Providers can briefly clear metadata between automatically queued
+        // songs. Such a gap is not an intentional pause/resume activation.
+        let playing = if track.title.is_empty() || track.updated.is_none() && !track.playing {
+            let gap = self.media_gap.get_or_insert_with(Instant::now);
+            if gap.elapsed().as_secs_f32() < 1. {
+                self.playing
+            } else {
+                false
+            }
+        } else {
+            self.media_gap = None;
+            track.playing
+        };
+        self.observe(playing, focusing);
+    }
+    pub fn observe(&mut self, playing: bool, focusing: bool) {
+        if playing && !self.playing {
+            self.owner = Some(0);
+            self.alert_after_activity = false;
+        }
+        if focusing && !self.focusing {
+            self.owner = Some(1);
+            self.alert_after_activity = false;
+        }
+        self.playing = playing;
+        self.focusing = focusing;
+    }
+    pub fn page(
+        &self,
+        alert: Option<usize>,
+        focusing: bool,
+        playing: bool,
+        last_page: usize,
+    ) -> usize {
+        if self.alert_after_activity
+            && let Some(page) = alert
+        {
+            return page.min(5);
+        }
+        match self.owner {
+            Some(0) if playing => 0,
+            Some(1) if focusing => 1,
+            _ if focusing => 1,
+            _ if playing => 0,
+            _ => alert.unwrap_or(last_page).min(5),
+        }
     }
 }
 
@@ -368,12 +427,9 @@ impl Window {
                     }
                     // The supplied compact reference has a 29px music plate,
                     // separate from the shell contour applied by the window region.
-                    let paused_focus = state.data.focus_remaining.is_some()
-                        && state.focus_left > 0
-                        && state.focus_left < s.focus_minutes as u64 * 60;
-                    let context = compact_page(
+                    let context = self.compact_activity.page(
                         state.alert.as_ref().map(|a| a.page),
-                        state.running.is_some() || paused_focus,
+                        state.running.is_some(),
                         track.playing,
                         self.page,
                     );
@@ -406,7 +462,14 @@ impl Window {
                         );
                     }
                     c.outline(left + 24.35, 10.35, 28.3, 28.3, 9.1, 0x999999);
-                    if let Some(alert) = &state.alert {
+                    if let Some(notice) = &self.power_notice {
+                        label(
+                            c,
+                            &notice.text(),
+                            (left + 70., 11., 175.),
+                            (10.5, 600, 0xffffff, 1),
+                        );
+                    } else if let Some(alert) = &state.alert {
                         label(
                             c,
                             &alert.text,
@@ -1254,10 +1317,57 @@ impl Window {
 #[cfg(test)]
 mod compact_context_tests {
     #[test]
-    fn alerts_then_focus_take_priority_over_background_music() {
-        assert_eq!(super::compact_page(Some(3), true, true, 0), 3);
-        assert_eq!(super::compact_page(None, true, true, 0), 1);
-        assert_eq!(super::compact_page(None, false, true, 2), 0);
-        assert_eq!(super::compact_page(None, false, false, 2), 2);
+    fn a_short_metadata_gap_during_focus_is_not_a_music_resume() {
+        let mut state = super::CompactActivity::default();
+        let mut track = crate::media::Track {
+            title: "First track".into(),
+            playing: true,
+            updated: Some(std::time::Instant::now()),
+            ..Default::default()
+        };
+        state.observe_track(&track, false);
+        state.observe_track(&track, true);
+        state.observe_track(&crate::media::Track::default(), true);
+        track.title = "Automatically queued track".into();
+        state.observe_track(&track, true);
+        assert_eq!(state.page(None, true, true, 0), 1);
+        track.playing = false;
+        state.observe_track(&track, true);
+        track.playing = true;
+        state.observe_track(&track, true);
+        assert_eq!(state.page(None, true, true, 0), 0);
+    }
+    #[test]
+    fn last_activated_activity_owns_the_icon_and_pauses_fall_back() {
+        let mut state = super::CompactActivity::default();
+        state.observe(true, false);
+        assert_eq!(state.page(None, false, true, 2), 0);
+        state.observe(true, true);
+        assert_eq!(state.page(None, true, true, 2), 1);
+        state.observe(true, true); // automatic song/metadata changes keep focus
+        assert_eq!(state.page(None, true, true, 2), 1);
+        state.observe(false, true);
+        assert_eq!(state.page(None, true, false, 2), 1);
+        state.observe(true, true);
+        assert_eq!(state.page(None, true, true, 2), 0);
+        state.observe(true, true); // metadata/next-track refresh is not activation
+        assert_eq!(state.page(None, true, true, 2), 0);
+        state.observe(true, false);
+        state.observe(true, true);
+        assert_eq!(state.page(None, true, true, 2), 1);
+        let alert = crate::Alert {
+            text: "Reminder fixture".into(),
+            is_water: true,
+            page: 3,
+            url: String::new(),
+        };
+        state.observe_alert(Some(&alert));
+        assert_eq!(state.page(Some(3), true, true, 2), 3);
+        state.observe(false, true);
+        state.observe(true, true);
+        state.observe_alert(Some(&alert)); // pending reminders do not lock ownership
+        assert_eq!(state.page(Some(3), true, true, 2), 0);
+        state.observe(false, false);
+        assert_eq!(state.page(None, false, false, 2), 2);
     }
 }

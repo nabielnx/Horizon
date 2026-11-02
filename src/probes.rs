@@ -18,6 +18,12 @@ pub(super) fn running_media_diagnostics(window: &Window) -> Result<()> {
         "coverRevision": track.cover_revision, "error": track.error,
         "coverRenderError": window.cover_render_error.borrow().as_str(),
         "batteryPercent": window.battery.percent, "batteryCharging": window.battery.charging,
+        "chargerConnected": window.battery.plugged, "chargerEffectActive": window.battery.energized(),
+        "powerConnectionChanges": window.power_changes, "lastPowerConnectionChange": window.last_power_change,
+        "powerNoticeVisible": window.power_notice.is_some(),
+        "powerEventsRegistered": window.power_notification.is_some(),
+        "compactContextPage": window.compact_activity.page(state.alert.as_ref().map(|alert| alert.page), state.running.is_some(), track.playing, window.page),
+        "focusRunning": state.running.is_some(),
         "lyricLines": track.lyrics.len(), "wordTimedLines": track.lyrics.iter().filter(|line| !line.words.is_empty()).count()
     });
     std::fs::create_dir_all("artifacts").map_err(|e| Error::new(E_FAIL, e.to_string()))?;
@@ -93,6 +99,45 @@ pub(super) unsafe fn startup_checks(hwnd: HWND, w: &mut Window) -> Result<()> {
             ));
         }
         w.idle_transition = None;
+        // Simulate AC edges at the window boundary; this does not change the
+        // machine's battery state or control another application.
+        let saved_battery = w.battery;
+        w.battery = power::Battery {
+            percent: Some(80),
+            plugged: Some(false),
+            charging: false,
+        };
+        let connected = power::Battery {
+            plugged: Some(true),
+            ..w.battery
+        };
+        if !update_battery(w, connected) || !w.battery.energized() || w.power_notice.is_none() {
+            return Err(Error::new(
+                E_FAIL,
+                "Plug-in did not activate the indicator and notice",
+            ));
+        }
+        w.mode = shell_policy::Mode::Compact;
+        w.paint()?;
+        if !update_battery(
+            w,
+            power::Battery {
+                plugged: Some(false),
+                ..connected
+            },
+        ) || w.battery.energized()
+            || w.power_changes != 2
+        {
+            return Err(Error::new(
+                E_FAIL,
+                "Unplug did not deactivate the indicator",
+            ));
+        }
+        w.paint()?;
+        w.battery = saved_battery;
+        w.power_notice = None;
+        w.power_changes = 0;
+        w.last_power_change = None;
         let mut frames = 0;
         for _ in 0..3 {
             for mode in [shell_policy::Mode::Peek, shell_policy::Mode::Compact] {
@@ -120,6 +165,7 @@ pub(super) unsafe fn startup_checks(hwnd: HWND, w: &mut Window) -> Result<()> {
             "systemBorderSuppressed": if border_supported { Some(true) } else { None },
             "hoverCycles": 3,
             "indicatorOpensDirectlyToPeek": true,
+            "plugUnplugIndicatorAndNoticesVerified": true,
             "hoverFramesRendered": frames,
             "hoverSnapshotsReadable": true
         });

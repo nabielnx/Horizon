@@ -985,7 +985,7 @@ impl Canvas {
                 length,
                 rail_h,
                 rail_h / 2.,
-                if tint.is_some() { 0xffffff } else { 0x485057 },
+                tint.map_or(0x485057, |ink| crate::motion::mix(ink, 0x14161a, 0.68)),
             );
 
             // 2. Liquid wave animation
@@ -1091,7 +1091,7 @@ impl Canvas {
                     bar_w,
                     rail_h,
                     rail_h / 2.,
-                    if tint.is_some() { 0xffffff } else { 0xd0d7de },
+                    tint.map_or(0xd0d7de, |ink| crate::motion::mix(ink, 0xffffff, 0.32)),
                 );
             }
         }
@@ -1762,7 +1762,7 @@ impl Canvas {
                 .iter()
                 .map(|v| (b.0 + 10. + v.0, b.1 + 7. + v.1))
                 .collect();
-            if battery.charging {
+            if battery.energized() {
                 let alpha = (20. + 18. * (phase * 3.).sin().abs()) as u32;
                 self.ellipse(b.0 + 4., b.1 + 3., 24., 24., (alpha << 24) | 0x57fa65);
             }
@@ -1788,7 +1788,7 @@ impl Canvas {
                     },
                 );
             }
-            if battery.charging {
+            if battery.energized() {
                 for (index, (x, y)) in [(6., 9.), (26., 7.), (25., 24.)].into_iter().enumerate() {
                     let amount = (phase * 2.4 + index as f32 * 2.1).sin().max(0.);
                     let radius = 0.4 + amount * 1.5;
@@ -2839,6 +2839,33 @@ pub fn wave_height(x: f64, span: f64, phase: f64, back: bool) -> f64 {
 mod waveform_tests {
     use super::*;
     #[test]
+    fn played_rails_use_the_front_wave_colour_at_both_thicknesses() {
+        unsafe {
+            let ink = 0x8649cb;
+            let expected = crate::motion::mix(ink, 0xffffff, 0.32);
+            for thickness in [2.5, 4.] {
+                let canvas = Canvas::image(200, 30).unwrap();
+                canvas.target.BeginDraw();
+                canvas.target.Clear(Some(&color(0x000000)));
+                canvas.mini_wave_tinted((10., 5., 180., 4.), 0.5, 0., false, Some(ink), thickness);
+                canvas.target.EndDraw(None, None).unwrap();
+                let mut pixels = vec![0; 200 * 30 * 4];
+                canvas
+                    .bitmap
+                    .as_ref()
+                    .unwrap()
+                    .CopyPixels(std::ptr::null(), 200 * 4, &mut pixels)
+                    .unwrap();
+                let p = &pixels[(11 * 200 + 30) * 4..(11 * 200 + 30) * 4 + 3];
+                for (value, shift) in p.iter().zip([0, 8, 16]) {
+                    assert!((*value as i32 - ((expected >> shift) & 255) as i32).abs() <= 2);
+                }
+                let unplayed = &pixels[(11 * 200 + 150) * 4..(11 * 200 + 150) * 4 + 3];
+                assert!(unplayed.iter().any(|value| *value < 100));
+            }
+        }
+    }
+    #[test]
     fn compact_battery_fill_uses_the_reported_percentage() {
         unsafe {
             let mut counts = Vec::new();
@@ -2852,6 +2879,7 @@ mod waveform_tests {
                     crate::power::Battery {
                         percent: Some(percent),
                         charging: false,
+                        plugged: Some(false),
                     },
                     0.,
                 );
@@ -2876,6 +2904,37 @@ mod waveform_tests {
             }
             assert_eq!(counts[0], 0);
             assert!(counts[1] > 0 && counts[2] > counts[1]);
+        }
+    }
+    #[test]
+    fn connected_adapter_changes_the_bolt_even_when_not_charging() {
+        unsafe {
+            let canvas = Canvas::image(80, 50).unwrap();
+            let mut frames = Vec::new();
+            for plugged in [false, true] {
+                canvas.target.BeginDraw();
+                canvas.target.Clear(Some(&color(0x000000)));
+                canvas.compact_status(
+                    (20., 10., 32., 30.),
+                    0.,
+                    crate::power::Battery {
+                        percent: Some(80),
+                        charging: false,
+                        plugged: Some(plugged),
+                    },
+                    0.5,
+                );
+                canvas.target.EndDraw(None, None).unwrap();
+                let mut pixels = vec![0; 80 * 50 * 4];
+                canvas
+                    .bitmap
+                    .as_ref()
+                    .unwrap()
+                    .CopyPixels(std::ptr::null(), 80 * 4, &mut pixels)
+                    .unwrap();
+                frames.push(pixels);
+            }
+            assert_ne!(frames[0], frames[1]);
         }
     }
     #[test]

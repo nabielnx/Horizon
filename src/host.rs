@@ -113,7 +113,7 @@ pub(super) fn frame_interval(w: &Window) -> Option<Duration> {
     } else if state.data.settings.motion
         && !w.expanded
         && w.mode == shell_policy::Mode::Compact
-        && w.battery.charging
+        && w.battery.energized()
     {
         Some(Duration::from_millis(33))
     } else {

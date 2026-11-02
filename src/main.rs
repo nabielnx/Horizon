@@ -172,6 +172,11 @@ struct Window {
     battery: power::Battery,
     battery_checked: Instant,
     battery_phase: Instant,
+    power_notice: Option<power::Notice>,
+    power_notification: Option<power::Notification>,
+    power_changes: u64,
+    last_power_change: Option<power::ConnectionChange>,
+    compact_activity: figma_ui::CompactActivity,
     last_policy_check: Instant,
     page: usize,
     hits: Vec<Hit>,
@@ -463,6 +468,32 @@ fn set_mode(w: &mut Window, next: shell_policy::Mode) {
         .then(|| shell_policy::Transition::new(from, to, Instant::now()));
     w.mode = next;
 }
+fn update_battery(w: &mut Window, next: power::Battery) -> bool {
+    w.battery_checked = Instant::now();
+    if next == w.battery {
+        return false;
+    }
+    if let Some(change) = w.battery.connection_change(next) {
+        w.power_notice = Some(power::Notice::new(change, next.percent, Instant::now()));
+        w.battery_phase = Instant::now();
+        w.power_changes += 1;
+        w.last_power_change = Some(change);
+        w.overlay = None;
+    }
+    w.battery = next;
+    true
+}
+fn sync_compact_activity(w: &mut Window) {
+    let state = w.shared.borrow();
+    let track = state
+        .media
+        .as_ref()
+        .and_then(|media| media.snapshot.lock().ok().map(|track| track.clone()))
+        .unwrap_or_default();
+    w.compact_activity
+        .observe_track(&track, state.running.is_some());
+    w.compact_activity.observe_alert(state.alert.as_ref());
+}
 unsafe fn desired_mode(hwnd: HWND, w: &Window) -> shell_policy::Mode {
     let fg = shell_policy::foreground(hwnd, w.shared.borrow().settings_window);
     let state = w.shared.borrow();
@@ -479,7 +510,7 @@ unsafe fn desired_mode(hwnd: HWND, w: &Window) -> shell_policy::Mode {
         fullscreen: fg.fullscreen,
         lyrics_pinned: state.data.settings.show_lyrics && playing,
         hide_fullscreen: true,
-        has_alert: state.alert.is_some(),
+        has_alert: state.alert.is_some() || w.power_notice.is_some(),
     };
     drop(state);
     shell_policy::decide(inputs)
@@ -1245,6 +1276,7 @@ unsafe fn action(hwnd: HWND, w: &mut Window, a: Action) {
         persist(w);
     }
     let root = w.shared.borrow().notch;
+    sync_compact_activity(w);
     if w.settings && !root.is_invalid() {
         let _ = PostMessageW(Some(root), WM_APP + 5, WPARAM(0), LPARAM(0));
     }
@@ -1566,6 +1598,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             LRESULT(0)
         }
         m if m == WM_APP + 9 => {
+            sync_compact_activity(w);
             let _ = InvalidateRect(Some(hwnd), None, false);
             LRESULT(0)
         }
@@ -1697,19 +1730,24 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             LRESULT(0)
         }
         WM_TIMER => {
+            let mut power_changed = false;
+            if w.power_notice
+                .as_ref()
+                .is_some_and(|notice| notice.expired(Instant::now()))
+            {
+                w.power_notice = None;
+                power_changed = true;
+            }
+            if !w.settings && !w.offscreen && w.battery_checked.elapsed().as_secs() >= 1 {
+                w.battery_checked = Instant::now();
+                if let Some(battery) = power::Battery::read() {
+                    power_changed |= update_battery(w, battery);
+                }
+            }
             let mut s = w.shared.borrow_mut();
             record_focus(&mut s);
             let minute = Local::now().timestamp() / 60;
-            let mut changed = (w.expanded && w.page == 0) || minute != w.minute;
-            if !w.settings && !w.offscreen && w.battery_checked.elapsed().as_secs() >= 5 {
-                w.battery_checked = Instant::now();
-                if let Some(battery) = power::Battery::read()
-                    && battery != w.battery
-                {
-                    w.battery = battery;
-                    changed = true;
-                }
-            }
+            let mut changed = power_changed || (w.expanded && w.page == 0) || minute != w.minute;
             w.minute = minute;
             s.data.reset_day();
             if s.running.is_some() {
@@ -1747,6 +1785,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 changed = true;
             }
             drop(s);
+            sync_compact_activity(w);
             if !w.settings {
                 update_policy(hwnd, w);
             }
@@ -1760,8 +1799,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 && !w.offscreen
                 && let Some(battery) = power::Battery::read()
             {
-                w.battery = battery;
-                w.battery_checked = Instant::now();
+                update_battery(w, battery);
+                update_policy(hwnd, w);
                 let _ = InvalidateRect(Some(hwnd), None, false);
             }
             LRESULT(1)
@@ -1839,6 +1878,11 @@ unsafe fn create(shared: Rc<RefCell<Shared>>, settings: bool, offscreen: bool) -
         },
         battery_checked: Instant::now(),
         battery_phase: Instant::now(),
+        power_notice: None,
+        power_notification: None,
+        power_changes: 0,
+        last_power_change: None,
+        compact_activity: figma_ui::CompactActivity::default(),
         last_policy_check: Instant::now(),
         page: if settings { 0 } else { 1 },
         hits: vec![],
@@ -1927,6 +1971,7 @@ unsafe fn create(shared: Rc<RefCell<Shared>>, settings: bool, offscreen: bool) -
         );
     }
     if !settings && !offscreen {
+        w.power_notification = power::Notification::register(hwnd);
         unsafe {
             DragAcceptFiles(hwnd, BOOL(1));
         }
