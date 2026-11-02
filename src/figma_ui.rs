@@ -23,24 +23,88 @@ fn idle_lyric(track: &media::Track, enabled: bool) -> &str {
         line.text.as_str()
     } else if track.title.is_empty() {
         "Horizon"
+    } else if !track.lyrics.is_empty() {
+        ""
     } else if !track.lyrics_loaded {
         "Menunggu lirik"
     } else {
         "Lirik belum tersedia"
     }
 }
+#[derive(Default)]
+pub(super) struct CompactActivity {
+    owner: Option<usize>,
+    playing: bool,
+    focusing: bool,
+    media_gap: Option<Instant>,
+    last_alert: Option<(usize, String)>,
+    alert_after_activity: bool,
+}
+impl CompactActivity {
+    pub fn observe_alert(&mut self, alert: Option<&Alert>) {
+        let same = match (&self.last_alert, alert) {
+            (Some((page, text)), Some(alert)) => *page == alert.page && *text == alert.text,
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            self.last_alert = alert.map(|alert| (alert.page, alert.text.clone()));
+            self.alert_after_activity = alert.is_some();
+        }
+    }
+    pub fn observe_track(&mut self, track: &media::Track, focusing: bool) {
+        // Providers can briefly clear metadata between automatically queued
+        // songs. Such a gap is not an intentional pause/resume activation.
+        let playing = if track.title.is_empty() || track.updated.is_none() && !track.playing {
+            let gap = self.media_gap.get_or_insert_with(Instant::now);
+            if gap.elapsed().as_secs_f32() < 1. {
+                self.playing
+            } else {
+                false
+            }
+        } else {
+            self.media_gap = None;
+            track.playing
+        };
+        self.observe(playing, focusing);
+    }
+    pub fn observe(&mut self, playing: bool, focusing: bool) {
+        if playing && !self.playing {
+            self.owner = Some(0);
+            self.alert_after_activity = false;
+        }
+        if focusing && !self.focusing {
+            self.owner = Some(1);
+            self.alert_after_activity = false;
+        }
+        self.playing = playing;
+        self.focusing = focusing;
+    }
+    pub fn page(
+        &self,
+        alert: Option<usize>,
+        focusing: bool,
+        playing: bool,
+        last_page: usize,
+    ) -> usize {
+        if self.alert_after_activity
+            && let Some(page) = alert
+        {
+            return page.min(5);
+        }
+        match self.owner {
+            Some(0) if playing => 0,
+            Some(1) if focusing => 1,
+            _ if focusing => 1,
+            _ if playing => 0,
+            _ => alert.unwrap_or(last_page).min(5),
+        }
+    }
+}
 
 unsafe fn mono_badge(c: &Canvas, icon: &'static str, b: (f32, f32, f32, f32)) {
     unsafe {
-        c.rect(b.0, b.1, b.2, b.3, b.2 * 0.28, 0x303030);
-        c.outline(
-            b.0 + 0.4,
-            b.1 + 0.4,
-            b.2 - 0.8,
-            b.3 - 0.8,
-            b.2 * 0.28,
-            0x666666,
-        );
+        c.glass_button(b, b.2 * 0.28, false);
         c.icon(
             icon,
             b.0 + b.2 * 0.12,
@@ -61,12 +125,12 @@ unsafe fn asset(c: &Canvas, name: &'static str, b: (f32, f32, f32, f32)) {
         "nav-tasks" => include_bytes!("../assets/figma/nav-tasks.png"),
         "nav-files" => include_bytes!("../assets/figma/nav-files.png"),
         "nav-settings" => include_bytes!("../assets/figma/nav-settings.png"),
-        "media-lyrics" => include_bytes!("../assets/figma/media-lyrics.png"),
+        "media-lyrics" => include_bytes!("../assets/figma/media-lyrics-glyph.png"),
         "media-previous" => include_bytes!("../assets/figma/media-previous.png"),
-        "media-pause" => include_bytes!("../assets/figma/media-pause.png"),
+        "media-pause" => include_bytes!("../assets/figma/media-pause-glyph.png"),
         "media-next" => include_bytes!("../assets/figma/media-next.png"),
         "media-heart" => include_bytes!("../assets/figma/media-heart.png"),
-        "peek-pause" => include_bytes!("../assets/figma/peek-pause.png"),
+        "peek-pause" => include_bytes!("../assets/figma/peek-pause-glyph.png"),
         "spotify" => include_bytes!("../assets/figma/spotify.png"),
         "repeat" => include_bytes!("../assets/figma/repeat.png"),
         "fire" => include_bytes!("../assets/figma/fire.png"),
@@ -94,7 +158,25 @@ unsafe fn label(c: &Canvas, text: &str, b: (f32, f32, f32), style: (f32, u16, u3
 }
 
 impl Window {
-    fn figma_transform(&self) -> (f32, f32) {
+    unsafe fn figma_lyric(
+        &self,
+        c: &Canvas,
+        track: &media::Track,
+        enabled: bool,
+        b: (f32, f32, f32, f32),
+        style: (f32, u16, u8),
+    ) {
+        unsafe {
+            if enabled && let Some(index) = track.lyric_index() {
+                let line = &track.lyrics[index];
+                let end = track.lyrics.get(index + 1).map_or(track.duration, |l| l.at);
+                c.design_karaoke(line, (track.position_now(), end), b, style, true);
+            } else {
+                c.design_text(idle_lyric(track, enabled), b, style, 0xffffff);
+            }
+        }
+    }
+    pub(super) fn figma_transform(&self) -> (f32, f32) {
         let width = self.shared.borrow().data.settings.width as f32;
         if self.expanded && self.page >= 3 {
             (1., 0.)
@@ -165,37 +247,12 @@ impl Window {
         unsafe {
             let b = (518., 29., 40., 39.);
             let hover = self.figma_hover(b);
-            let light = c.hover_amount(b, hover);
-            let press = c.animate_value(b, 1, f32::from(hover && self.pressed), motion::PRESS);
-            let dy = if self.shared.borrow().data.settings.motion {
-                -light + press * 2.
-            } else {
-                0.
-            };
-            c.rect(
-                b.0,
-                b.1 + dy,
-                b.2,
-                b.3,
-                11.,
-                if track.playing {
-                    motion::mix(0x131313, 0x202020, light)
-                } else {
-                    motion::mix(0x2b2b2b, 0x373737, light)
-                },
-            );
+            let dy = c.glass_button(b, 11., hover);
             if track.playing {
                 asset(c, "peek-pause", (b.0, b.1 + dy, b.2, b.3));
             } else {
-                c.icon("play", b.0 + 8., b.1 + 7.5 + dy, 24., 0xffffff);
+                c.icon_centered("play", (b.0, b.1 + dy, b.2, b.3), 24.);
             }
-            c.glass_edge(b.0, b.1 + dy, b.2, b.3, 11., light);
-            c.line(
-                (b.0 + 12., b.1 + 0.7 + dy),
-                (b.0 + 28., b.1 + 0.7 + dy),
-                0.7,
-                0x65ffffff,
-            );
             self.figma_hit(b, Action::Media(0));
         }
     }
@@ -226,27 +283,7 @@ impl Window {
     ) -> f32 {
         unsafe {
             let hover = self.figma_hover(b);
-            let t = c.hover_amount(b, hover);
-            let press = c.animate_value(b, 1, f32::from(hover && self.pressed), motion::PRESS);
-            let dy = if self.shared.borrow().data.settings.motion {
-                -t + 2. * press
-            } else {
-                0.
-            };
-            let transport = b.1 == 154. && (b.0 == 251. || b.0 == 343.);
-            c.rect(
-                b.0,
-                b.1 + dy,
-                b.2,
-                b.3,
-                radius,
-                if transport {
-                    0x33000000 | motion::mix(0xff7373, 0xffaaaa, t)
-                } else {
-                    motion::mix(0x191919, 0x303030, t)
-                },
-            );
-            c.glass_edge(b.0, b.1 + dy, b.2, b.3, radius, t);
+            let dy = c.glass_button(b, radius, hover);
             self.figma_hit(b, action);
             dy
         }
@@ -259,6 +296,17 @@ impl Window {
         action: Action,
     ) {
         unsafe {
+            // Every transport shares one opaque surface. Raster assets contain
+            // glyphs only, so hover never stacks a second baked-in plate/rim.
+            if name.starts_with("media-") {
+                let dy = self.figma_plate(c, b, 17., action);
+                if name == "media-heart" {
+                    c.icon_filled("heart", b.0 + 12., b.1 + 12. + dy, 26., 0xffffff);
+                } else {
+                    asset(c, name, (b.0, b.1 + dy, b.2, b.3));
+                }
+                return;
+            }
             let hit = if b.2 <= 18. && b.3 <= 18. {
                 (b.0 - (24. - b.2) / 2., b.1 - (24. - b.3) / 2., 24., 24.)
             } else {
@@ -272,10 +320,6 @@ impl Window {
             } else {
                 0.
             };
-            if matches!(name, "media-next" | "media-previous") {
-                c.rect(b.0, b.1 + dy, b.2, b.3, 17., 0x1affffff);
-                c.glass_edge(b.0, b.1 + dy, b.2, b.3, 17., light);
-            }
             if matches!(name, "calendar-back" | "calendar-next") {
                 c.icon(
                     if name == "calendar-back" {
@@ -288,10 +332,6 @@ impl Window {
                     20.,
                     0xffffff,
                 );
-            } else if name == "media-heart" {
-                c.rect(b.0, b.1 + dy, b.2, b.3, 17., 0x242424);
-                c.glass_edge(b.0, b.1 + dy, b.2, b.3, 17., light);
-                c.icon_filled("heart", b.0 + 12., b.1 + 12. + dy, 26., 0xffffff);
             } else {
                 asset(c, name, (b.0, b.1 + dy, b.2, b.3));
             }
@@ -337,19 +377,84 @@ impl Window {
                     }
                     // The supplied compact reference has a 29px music plate,
                     // separate from the shell contour applied by the window region.
-                    asset(c, "nav-music", (left + 24., 10., 29., 29.));
-                    c.outline(left + 24.35, 10.35, 28.3, 28.3, 9.1, 0x999999);
-                    let lyric = idle_lyric(&track, s.show_lyrics);
-                    let caption = state
-                        .alert
-                        .as_ref()
-                        .map(|a| a.text.as_str())
-                        .unwrap_or(lyric);
-                    label(c, caption, (left + 70., 11., 175.), (12., 700, 0xffffff, 1));
+                    let context = self.compact_activity.page(
+                        state.alert.as_ref().map(|a| a.page),
+                        state.running.is_some(),
+                        track.playing,
+                        self.page,
+                    );
+                    let icon_bounds = (left + 24., 10., 29., 29.);
+                    let mut cover_drawn = false;
+                    let dy = c.glass_content(icon_bounds, 8., self.figma_hover(icon_bounds), |b| {
+                        cover_drawn = context == 0
+                            && track.cover.as_ref().is_some_and(|bytes| {
+                                c.cover_rect(
+                                    &format!(
+                                        "{}|{}|{}",
+                                        track.title, track.artist, track.cover_revision
+                                    ),
+                                    bytes,
+                                    (b.0 + 1.2, b.1 + 1.2, b.2 - 2.4, b.3 - 2.4),
+                                    6.8,
+                                )
+                                .is_ok()
+                            });
+                    });
+                    if !cover_drawn {
+                        c.icon_centered(
+                            [
+                                "music-notes",
+                                "timer",
+                                "calendar-dots",
+                                "drop",
+                                "list-checks",
+                                "files",
+                            ][context],
+                            (
+                                icon_bounds.0,
+                                icon_bounds.1 + dy,
+                                icon_bounds.2,
+                                icon_bounds.3,
+                            ),
+                            22.,
+                        );
+                    }
+                    if let Some(notice) = &self.power_notice {
+                        label(
+                            c,
+                            &notice.text(),
+                            (left + 70., 11., 175.),
+                            (10.5, 600, 0xffffff, 1),
+                        );
+                    } else if let Some(alert) = &state.alert {
+                        label(
+                            c,
+                            &alert.text,
+                            (left + 70., 11., 175.),
+                            (12., 700, 0xffffff, 1),
+                        );
+                    } else {
+                        self.figma_lyric(
+                            c,
+                            &track,
+                            s.show_lyrics,
+                            (left + 70., 11., 175., 21.),
+                            (12., 700, 1),
+                        );
+                    }
                     self.figma_idle_wave(c, state, &track, (left + 70., 29., 175., 12.));
                     let b = (left + 257., 9., 32., 30.);
                     let hover = c.hover_amount(b, self.figma_hover(b));
-                    c.compact_status(b, hover);
+                    c.compact_status(
+                        b,
+                        hover,
+                        self.battery,
+                        if s.motion {
+                            self.battery_phase.elapsed().as_secs_f32()
+                        } else {
+                            0.
+                        },
+                    );
                     self.figma_hit(b, Action::OpenAlert);
                     self.figma_hit((left, 0., 310., 50.), Action::OpenAlert);
                 } else if track.playing {
@@ -360,8 +465,13 @@ impl Window {
                     label(c, &track.title, (108., 22., 160.), (16., 600, 0xffffff, 0));
                     label(c, &track.artist, (108., 50., 160.), (12., 600, 0xffffff, 0));
                     c.rect(276., 30., 1., 41., 0., 0x434343);
-                    let caption = idle_lyric(&track, s.show_lyrics);
-                    label(c, caption, (292., 27., 196.), (11.5, 600, 0xffffff, 0));
+                    self.figma_lyric(
+                        c,
+                        &track,
+                        s.show_lyrics,
+                        (292., 27., 196., 20.),
+                        (11.5, 600, 0),
+                    );
                     self.figma_idle_wave(c, state, &track, (292., 49., 196., 12.));
                     label(
                         c,
@@ -389,6 +499,14 @@ impl Window {
                     (0., 0., width.max(591.), 270.),
                     self.palette.sample(Instant::now())[0],
                 );
+                if s.show_lyrics {
+                    c.lyric_glow(
+                        (382., 0., width.max(591.) - 402., host_height() as f32),
+                        self.palette.sample(Instant::now()),
+                        self.lyric_glow_phase,
+                        self.lyric_glow_seed,
+                    );
+                }
             }
             self.figma_sidebar(c);
             match self.page {
@@ -406,13 +524,22 @@ impl Window {
     unsafe fn figma_cover(&self, c: &Canvas, track: &media::Track, b: (f32, f32, f32, f32)) {
         unsafe {
             let drawn = track.cover.as_ref().is_some_and(|bytes| {
-                c.cover_rect(
+                let result = c.cover_rect(
                     &format!("{}|{}|{}", track.title, track.artist, track.cover_revision),
                     bytes,
                     b,
                     13.,
-                )
-                .is_ok()
+                );
+                match result {
+                    Ok(()) => {
+                        self.cover_render_error.borrow_mut().clear();
+                        true
+                    }
+                    Err(error) => {
+                        *self.cover_render_error.borrow_mut() = error.to_string();
+                        false
+                    }
+                }
             });
             if !drawn {
                 c.rect(b.0, b.1, b.2, b.3, 13., 0x232323);
@@ -452,20 +579,35 @@ impl Window {
                 }
                 let hit = (10., visible_top, 40., visible_bottom - visible_top);
                 let hover = c.hover_amount((10., y, 40., 40.), self.figma_hover(hit));
-                c.rect(
-                    10.,
-                    y,
-                    40.,
-                    40.,
+                // Key selection to the page, not its scrolling pixel position.
+                let selection = c.animate_value(
+                    (i as f32, -48., 40., 40.),
+                    2,
+                    f32::from(i == self.page),
+                    motion::STATE,
+                );
+                let press = c.animate_value(
+                    (10., y, 40., 40.),
+                    1,
+                    f32::from(self.pressed && self.figma_hover(hit)),
+                    motion::PRESS,
+                );
+                let dy = if self.shared.borrow().data.settings.motion {
+                    -hover + press * 1.5
+                } else {
+                    0.
+                };
+                c.glass_panel(
+                    (10., y + dy, 40., 40.),
                     13.,
                     motion::mix(
-                        if i == self.page { 0x414141 } else { 0x242424 },
+                        motion::mix(0x242424, 0x414141, selection),
                         0x4a4a4a,
-                        hover,
+                        hover * 0.65,
                     ),
+                    hover,
                 );
-                c.glass_edge(10., y, 40., 40., 13., hover);
-                c.icon(icon, 16., y + 6., 28., 0xffffff);
+                c.icon(icon, 16., y + 6. + dy, 28., 0xffffff);
                 self.figma_hit(hit, Action::Page(i));
             }
             c.pop_design_clip();
@@ -523,14 +665,18 @@ impl Window {
             );
             let source_y = artist_y + 25.;
             let spotify = track.source_app.to_lowercase().contains("spotify");
-            if spotify {
+            if track.cover_source_url.is_some() {
+                c.icon("external-link", 176., source_y, 18., 0xffffff);
+            } else if spotify {
                 asset(c, "spotify", (176., source_y, 18., 18.));
             } else {
                 c.icon("headphones", 176., source_y, 18., 0xffffff);
             }
             label(
                 c,
-                if spotify {
+                if track.cover_source_url.is_some() {
+                    "Cover Apple Music ↗"
+                } else if spotify {
                     "Play on Spotify"
                 } else {
                     "Media Windows"
@@ -538,7 +684,14 @@ impl Window {
                 (200., source_y + 1., 151.),
                 (10., 600, 0xffffff, 0),
             );
-            self.figma_hit((176., source_y, 175., 20.), Action::Media(0));
+            self.figma_hit(
+                (176., source_y, 175., 20.),
+                if track.cover_source_url.is_some() {
+                    Action::CoverSource
+                } else {
+                    Action::Media(0)
+                },
+            );
             self.figma_idle_wave(c, state, track, (73., 141., 278., 25.));
             label(
                 c,
@@ -568,7 +721,7 @@ impl Window {
                 self.figma_asset_button(c, "media-pause", (187., 204., 50., 50.), Action::Media(0));
             } else {
                 let dy = self.figma_plate(c, (187., 204., 50., 50.), 17., Action::Media(0));
-                c.icon("play", 202., 217. + dy, 24., 0xffffff);
+                c.icon_centered("play", (187., 204. + dy, 50., 50.), 24.);
             }
             self.figma_asset_button(c, "media-next", (244., 204., 50., 50.), Action::Media(2));
             let favorite = state
@@ -583,7 +736,11 @@ impl Window {
             }
             c.rect(365., 25., 1., 230., 0.5, 0x343a43);
             if state.data.settings.show_lyrics && !track.lyrics.is_empty() {
-                let current = track.lyric_index().unwrap_or(0);
+                let active_index = track.lyric_index();
+                let current = track
+                    .lyrics
+                    .partition_point(|line| line.at <= track.position_now())
+                    .saturating_sub(1);
                 let start = current.saturating_sub(14);
                 let end = (current + 15).min(track.lyrics.len());
                 let bounds = (
@@ -601,7 +758,7 @@ impl Window {
                 }
                 let heights: Vec<f32> = (start..end)
                     .map(|index| {
-                        let active = index == current;
+                        let active = active_index == Some(index);
                         let size = if active { active_size } else { 11.5 };
                         c.design_measure(
                             &track.lyrics[index].text,
@@ -617,22 +774,36 @@ impl Window {
                 c.push_design_clip(bounds);
                 for row in rows {
                     let index = start + row.index;
-                    let active = index == current;
+                    let active = active_index == Some(index);
                     let distance = index.abs_diff(current).saturating_sub(1) as f32;
-                    c.design_text(
-                        &track.lyrics[index].text,
-                        (bounds.0, row.y, bounds.2, row.height),
-                        (
-                            if active { active_size } else { 11.5 },
-                            if active { 700 } else { 400 },
-                            2,
-                        ),
-                        if active {
-                            0xffffff
-                        } else {
-                            motion::mix(0xa8b0bc, 0x68717e, distance / 5.)
-                        },
-                    );
+                    if active {
+                        let end = track
+                            .lyrics
+                            .get(index + 1)
+                            .map_or(track.duration, |line| line.at);
+                        c.design_karaoke(
+                            &track.lyrics[index],
+                            (track.position_now(), end),
+                            (bounds.0, row.y, bounds.2, row.height),
+                            (active_size, 700, 2),
+                            false,
+                        );
+                    } else {
+                        c.design_text(
+                            &track.lyrics[index].text,
+                            (bounds.0, row.y, bounds.2, row.height),
+                            (
+                                if active { active_size } else { 11.5 },
+                                if active { 700 } else { 400 },
+                                2,
+                            ),
+                            if active {
+                                0xffffff
+                            } else {
+                                motion::mix(0xa8b0bc, 0x68717e, distance / 5.)
+                            },
+                        );
+                    }
                 }
                 c.pop_design_clip();
             } else {
@@ -1049,11 +1220,9 @@ impl Window {
         unsafe {
             mono_badge(c, "clock", (30., 12., 31., 31.));
             mono_badge(c, "calendar-dots", (30., 50., 32., 32.));
-            label(
-                c,
+            c.design_glass_clock(
                 &Local::now().format("%H.%M").to_string(),
-                (71., 2., 147.),
-                (36., 600, 0x85ffffff, 0),
+                (71., 2., 147., 57.6),
             );
             let date = Local::now().format("%A, %-d %B %Y").to_string();
             let date_width = c.design_measure(&date, 2000., (15., 600, 0)).0;
@@ -1132,5 +1301,62 @@ impl Window {
             self.figma_peek_playback(c, track);
             self.figma_hit((20., 8., 260., 80.), Action::OpenAlert);
         }
+    }
+}
+#[cfg(test)]
+mod compact_context_tests {
+    #[test]
+    fn a_short_metadata_gap_during_focus_is_not_a_music_resume() {
+        let mut state = super::CompactActivity::default();
+        let mut track = crate::media::Track {
+            title: "First track".into(),
+            playing: true,
+            updated: Some(std::time::Instant::now()),
+            ..Default::default()
+        };
+        state.observe_track(&track, false);
+        state.observe_track(&track, true);
+        state.observe_track(&crate::media::Track::default(), true);
+        track.title = "Automatically queued track".into();
+        state.observe_track(&track, true);
+        assert_eq!(state.page(None, true, true, 0), 1);
+        track.playing = false;
+        state.observe_track(&track, true);
+        track.playing = true;
+        state.observe_track(&track, true);
+        assert_eq!(state.page(None, true, true, 0), 0);
+    }
+    #[test]
+    fn last_activated_activity_owns_the_icon_and_pauses_fall_back() {
+        let mut state = super::CompactActivity::default();
+        state.observe(true, false);
+        assert_eq!(state.page(None, false, true, 2), 0);
+        state.observe(true, true);
+        assert_eq!(state.page(None, true, true, 2), 1);
+        state.observe(true, true); // automatic song/metadata changes keep focus
+        assert_eq!(state.page(None, true, true, 2), 1);
+        state.observe(false, true);
+        assert_eq!(state.page(None, true, false, 2), 1);
+        state.observe(true, true);
+        assert_eq!(state.page(None, true, true, 2), 0);
+        state.observe(true, true); // metadata/next-track refresh is not activation
+        assert_eq!(state.page(None, true, true, 2), 0);
+        state.observe(true, false);
+        state.observe(true, true);
+        assert_eq!(state.page(None, true, true, 2), 1);
+        let alert = crate::Alert {
+            text: "Reminder fixture".into(),
+            is_water: true,
+            page: 3,
+            url: String::new(),
+        };
+        state.observe_alert(Some(&alert));
+        assert_eq!(state.page(Some(3), true, true, 2), 3);
+        state.observe(false, true);
+        state.observe(true, true);
+        state.observe_alert(Some(&alert)); // pending reminders do not lock ownership
+        assert_eq!(state.page(Some(3), true, true, 2), 0);
+        state.observe(false, false);
+        assert_eq!(state.page(None, false, false, 2), 2);
     }
 }

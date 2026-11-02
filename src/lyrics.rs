@@ -7,10 +7,132 @@ use std::{
     },
 };
 use windows::core::*;
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Line {
     pub at: f64,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<f64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub words: Vec<Word>,
+}
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Word {
+    pub at: f64,
+    pub end: Option<f64>,
+    pub text: String,
+}
+impl Line {
+    /// Fractional UTF-16 position; DirectWrite resolves it to glyph geometry.
+    pub fn sung_units(&self, position: f64, next: f64) -> f32 {
+        let length = self.text.encode_utf16().count() as f64;
+        let end = self.end.unwrap_or(next).max(self.at + 0.001);
+        if self.words.is_empty() {
+            return (length * ((position - self.at) / (end - self.at)).clamp(0., 1.)) as f32;
+        }
+        let mut units = 0.;
+        for (index, word) in self.words.iter().enumerate() {
+            if position < word.at {
+                break;
+            }
+            let stop = word
+                .end
+                .or_else(|| self.words.get(index + 1).map(|w| w.at))
+                .unwrap_or(end)
+                .max(word.at + 0.001);
+            let fraction = ((position - word.at) / (stop - word.at)).clamp(0., 1.);
+            units += word.text.encode_utf16().count() as f64 * fraction;
+            if fraction < 1. {
+                break;
+            }
+        }
+        units.min(length) as f32
+    }
+}
+
+pub fn parse_record(record: &serde_json::Value) -> Vec<Line> {
+    #[derive(serde::Deserialize)]
+    struct Document {
+        version: String,
+        #[serde(default)]
+        lines: Vec<RawLine>,
+    }
+    #[derive(serde::Deserialize)]
+    struct RawLine {
+        text: String,
+        start_ms: u64,
+        end_ms: Option<u64>,
+        #[serde(default)]
+        words: Vec<RawWord>,
+    }
+    #[derive(serde::Deserialize)]
+    struct RawWord {
+        text: String,
+        start_ms: u64,
+        end_ms: Option<u64>,
+    }
+    if let Some(yaml) = record["lyricsfile"]
+        .as_str()
+        .filter(|s| s.len() <= 512 * 1024)
+        && let Ok(document) = serde_yaml_ng::from_str::<Document>(yaml)
+        && document.version == "1.0"
+        && document.lines.len() <= 2048
+    {
+        let mut lines = Vec::new();
+        for line in document.lines {
+            if line.text.len() > 4096
+                || line.start_ms > 86_400_000
+                || line
+                    .end_ms
+                    .is_some_and(|end| end < line.start_ms || end > 86_400_000)
+            {
+                continue;
+            }
+            let valid_words = line.words.len() <= 1024
+                && line
+                    .words
+                    .iter()
+                    .map(|w| w.text.as_str())
+                    .collect::<String>()
+                    == line.text
+                && line
+                    .words
+                    .windows(2)
+                    .all(|w| w[0].start_ms <= w[1].start_ms)
+                && line.words.iter().all(|w| {
+                    w.start_ms >= line.start_ms
+                        && w.start_ms <= 86_400_000
+                        && w.end_ms
+                            .is_none_or(|end| end >= w.start_ms && end <= 86_400_000)
+                });
+            let words = if valid_words {
+                line.words
+                    .into_iter()
+                    .map(|w| Word {
+                        at: w.start_ms as f64 / 1000.,
+                        end: w.end_ms.map(|v| v as f64 / 1000.),
+                        text: w.text,
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            lines.push(Line {
+                at: line.start_ms as f64 / 1000.,
+                end: line.end_ms.map(|v| v as f64 / 1000.),
+                text: line.text,
+                words,
+            });
+        }
+        lines.sort_by(|a, b| a.at.total_cmp(&b.at));
+        if !lines.is_empty() {
+            return lines;
+        }
+    }
+    record["syncedLyrics"]
+        .as_str()
+        .map(parse)
+        .unwrap_or_default()
 }
 #[link(name = "winhttp")]
 unsafe extern "system" {
@@ -100,6 +222,9 @@ struct HttpClient {
 }
 impl HttpClient {
     fn new() -> Result<Self> {
+        Self::for_host("lrclib.net")
+    }
+    fn for_host(host: &str) -> Result<Self> {
         unsafe {
             let session = Handle::new(WinHttpOpen(
                 w!("Horizon/0.3 (https://github.com/nabielnx/Horizon)").as_ptr(),
@@ -111,12 +236,92 @@ impl HttpClient {
             if WinHttpSetTimeouts(session.0, 1500, 2000, 2000, 2500) == 0 {
                 return Err(Error::from_thread());
             }
-            let connection =
-                Handle::new(WinHttpConnect(session.0, w!("lrclib.net").as_ptr(), 443, 0))?;
+            let connection = Handle::new(WinHttpConnect(
+                session.0,
+                HSTRING::from(host).as_ptr(),
+                443,
+                0,
+            ))?;
             Ok(Self {
                 connection,
                 _session: session,
             })
+        }
+    }
+}
+/// Bounded HTTPS for artwork, deliberately independent of LRCLIB cooldowns.
+pub(crate) fn artwork_get(
+    host: &str,
+    path: &str,
+    limit: usize,
+    alive: &impl Fn() -> bool,
+) -> Result<Vec<u8>> {
+    unsafe {
+        if !alive() {
+            return Err(Error::from_hresult(windows::Win32::Foundation::E_ABORT));
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
+        let client = HttpClient::for_host(host)?;
+        let path = HSTRING::from(path);
+        let request = Handle::new(WinHttpOpenRequest(
+            client.connection.0,
+            w!("GET").as_ptr(),
+            path.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            0x00800000,
+        ))?;
+        if WinHttpSendRequest(request.0, std::ptr::null(), 0, std::ptr::null(), 0, 0, 0) == 0
+            || WinHttpReceiveResponse(request.0, std::ptr::null_mut()) == 0
+        {
+            return Err(Error::from_thread());
+        }
+        let mut status = 0_u32;
+        let mut size = 4;
+        if WinHttpQueryHeaders(
+            request.0,
+            19 | 0x20000000,
+            std::ptr::null(),
+            (&mut status as *mut u32).cast(),
+            &mut size,
+            std::ptr::null_mut(),
+        ) == 0
+        {
+            return Err(Error::from_thread());
+        }
+        if status != 200 {
+            return Err(Error::new(
+                windows::Win32::Foundation::E_FAIL,
+                format!("Artwork HTTP {status}"),
+            ));
+        }
+        let mut bytes = Vec::new();
+        loop {
+            if !alive() || std::time::Instant::now() >= deadline {
+                return Err(Error::from_hresult(windows::Win32::Foundation::E_ABORT));
+            }
+            let mut buf = [0_u8; 8192];
+            let mut count = 0;
+            if WinHttpReadData(
+                request.0,
+                buf.as_mut_ptr().cast(),
+                buf.len() as u32,
+                &mut count,
+            ) == 0
+            {
+                return Err(Error::from_thread());
+            }
+            if count == 0 {
+                return Ok(bytes);
+            }
+            if bytes.len() + count as usize > limit {
+                return Err(Error::new(
+                    windows::Win32::Foundation::E_INVALIDARG,
+                    "Artwork response too large",
+                ));
+            }
+            bytes.extend_from_slice(&buf[..count as usize]);
         }
     }
 }
@@ -294,10 +499,11 @@ pub fn parse(text: &str) -> Vec<Line> {
             row = &row[end + 1..];
         }
         for at in times {
-            if !row.trim().is_empty() {
+            if row.len() <= 4096 {
                 lines.push(Line {
                     at,
                     text: row.trim().chars().take(1024).collect(),
+                    ..Default::default()
                 });
             }
         }
@@ -330,6 +536,7 @@ pub fn first_artist(artist: &str) -> &str {
 
 type CacheKey = (String, String, u64);
 struct CacheEntry {
+    format_version: u8,
     lines: Vec<Line>,
     expires: std::time::Instant,
 }
@@ -422,6 +629,23 @@ pub fn cached(title: &str, artist: &str, duration: f64) -> Option<Vec<Line>> {
         .or_else(|| cache.iter().find(|(stored, _)| *stored == key))
         .map(|(_, entry)| entry.lines.clone())
 }
+pub fn needs_refresh(title: &str, artist: &str, duration: f64) -> bool {
+    let key = cache_key(title, artist, duration);
+    LYRIC_CACHE.lock().is_ok_and(|cache| {
+        cache
+            .iter()
+            .filter(|(stored, entry)| {
+                stored.0 == key.0
+                    && stored.1 == key.1
+                    && (stored.2 == key.2
+                        || stored.2 > 0 && key.2 > 0 && stored.2.abs_diff(key.2) <= 1)
+                    && !entry.lines.is_empty()
+                    && entry.expires > std::time::Instant::now()
+            })
+            .min_by_key(|(stored, _)| stored.2.abs_diff(key.2))
+            .is_some_and(|(_, entry)| entry.format_version < 2)
+    })
+}
 pub fn store_cache(title: &str, artist: &str, duration: f64, lines: Vec<Line>) {
     let key = cache_key(title, artist, duration);
     let ttl = if lines.is_empty() {
@@ -430,10 +654,18 @@ pub fn store_cache(title: &str, artist: &str, duration: f64, lines: Vec<Line>) {
         86400
     };
     if let Ok(mut cache) = LYRIC_CACHE.lock() {
+        if lines.is_empty()
+            && cache
+                .iter()
+                .any(|(stored, entry)| *stored == key && !entry.lines.is_empty())
+        {
+            return;
+        }
         cache.retain(|(stored, _)| *stored != key);
         cache.push_back((
             key,
             CacheEntry {
+                format_version: 2,
                 lines,
                 expires: std::time::Instant::now() + std::time::Duration::from_secs(ttl),
             },
@@ -448,7 +680,15 @@ pub fn store_cache(title: &str, artist: &str, duration: f64, lines: Vec<Line>) {
                         + entry
                             .lines
                             .iter()
-                            .map(|line| line.text.capacity())
+                            .map(|line| {
+                                line.text.capacity()
+                                    + line.words.capacity() * std::mem::size_of::<Word>()
+                                    + line
+                                        .words
+                                        .iter()
+                                        .map(|word| word.text.capacity())
+                                        .sum::<usize>()
+                            })
                             .sum::<usize>()
                 })
                 .sum::<usize>()
@@ -460,7 +700,7 @@ pub fn store_cache(title: &str, artist: &str, duration: f64, lines: Vec<Line>) {
 }
 
 enum SearchResult {
-    Found(String),
+    Found(Vec<Line>),
     NotFound,
     ServerDown,
 }
@@ -497,7 +737,7 @@ fn search_synced(
             {
                 continue;
             }
-            if row["syncedLyrics"].as_str().is_some() {
+            if row["syncedLyrics"].as_str().is_some() || row["lyricsfile"].as_str().is_some() {
                 let dur = row["duration"].as_f64().unwrap_or(0.);
                 let diff = (dur - target_dur).abs();
                 if diff <= 12. && best.as_ref().is_none_or(|b| diff < b.1) {
@@ -505,10 +745,11 @@ fn search_synced(
                 }
             }
         }
-        if let Some((row, _)) = best
-            && let Some(lrc) = row["syncedLyrics"].as_str()
-        {
-            return SearchResult::Found(lrc.to_string());
+        if let Some((row, _)) = best {
+            let lines = parse_record(row);
+            if !lines.is_empty() {
+                return SearchResult::Found(lines);
+            }
         }
     }
 
@@ -523,9 +764,10 @@ fn search_synced(
                     .as_str()
                     .is_some_and(|name| first_artist(name).eq_ignore_ascii_case(artist))
         })
-        .find_map(|row| row["syncedLyrics"].as_str())
+        .map(parse_record)
+        .find(|lines| !lines.is_empty())
     {
-        SearchResult::Found(lrc.to_string())
+        SearchResult::Found(lrc)
     } else {
         SearchResult::NotFound
     }
@@ -558,7 +800,9 @@ fn fetch(title: &str, artist: &str, duration: f64, alive: impl Fn() -> bool) -> 
     if !alive() {
         return vec![];
     }
-    if let Some(cached) = cached(title, artist, duration) {
+    if let Some(cached) =
+        cached(title, artist, duration).filter(|_| !needs_refresh(title, artist, duration))
+    {
         return cached;
     }
     // Skip non-music media / long video recaps (> 15 minutes)
@@ -574,10 +818,8 @@ fn fetch(title: &str, artist: &str, duration: f64, alive: impl Fn() -> bool) -> 
     for path in exact_paths(title, artist, duration) {
         match get(&path, &alive) {
             Ok(Response::Ok(bytes)) => {
-                if let Ok(data) = serde_json::from_slice::<serde_json::Value>(&bytes)
-                    && let Some(text) = data["syncedLyrics"].as_str()
-                {
-                    let lines = parse(text);
+                if let Ok(data) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                    let lines = parse_record(&data);
                     if !lines.is_empty() {
                         store_cache(title, artist, duration, lines.clone());
                         return lines;
@@ -605,8 +847,7 @@ fn fetch(title: &str, artist: &str, duration: f64, alive: impl Fn() -> bool) -> 
         encode(fa)
     );
     match search_synced(&path, duration, fa, &alive) {
-        SearchResult::Found(text) => {
-            let lines = parse(&text);
+        SearchResult::Found(lines) => {
             if !lines.is_empty() {
                 store_cache(title, artist, duration, lines.clone());
                 return lines;
@@ -625,8 +866,7 @@ fn fetch(title: &str, artist: &str, duration: f64, alive: impl Fn() -> bool) -> 
     let query = format!("{} {}", fa, ct);
     let path = format!("/api/search?q={}", encode(query.trim()));
     match search_synced(&path, duration, fa, &alive) {
-        SearchResult::Found(text) => {
-            let lines = parse(&text);
+        SearchResult::Found(lines) => {
             if !lines.is_empty() {
                 store_cache(title, artist, duration, lines.clone());
                 return lines;
@@ -644,8 +884,7 @@ fn fetch(title: &str, artist: &str, duration: f64, alive: impl Fn() -> bool) -> 
     // 4. Search query: "/api/search?q=title"
     let path = format!("/api/search?q={}", encode(ct.trim()));
     match search_synced(&path, duration, fa, &alive) {
-        SearchResult::Found(text) => {
-            let lines = parse(&text);
+        SearchResult::Found(lines) => {
             if !lines.is_empty() {
                 store_cache(title, artist, duration, lines.clone());
                 return lines;
@@ -681,6 +920,7 @@ fn load_disk_cache(path: &std::path::Path) {
         {
             entry.expires = std::time::Instant::now()
                 + std::time::Duration::from_secs(record.expires.saturating_sub(unix).min(86400));
+            entry.format_version = record.format_version;
         }
     }
 }
@@ -692,6 +932,7 @@ fn persist_disk_cache(path: &std::path::Path) {
             .iter()
             .filter(|(_, entry)| !entry.lines.is_empty() && entry.expires > now)
             .map(|(key, entry)| crate::lyrics_disk::Record {
+                format_version: entry.format_version,
                 title: key.0.clone(),
                 artist: key.1.clone(),
                 duration: key.2,
@@ -740,6 +981,15 @@ pub fn worker(
                             && (s.duration - job.duration).abs() < 2.
                     })
             };
+            if let Some(lines) =
+                cached(&job.title, &job.artist, job.duration).filter(|lines| !lines.is_empty())
+                && alive()
+                && let Ok(mut data) = state.lock()
+            {
+                data.lyrics = Arc::new(lines);
+                data.lyrics_loaded = true;
+                crate::media::notify(&notify);
+            }
             let lines = fetch(&job.title, &job.artist, job.duration, alive);
             let persist = !lines.is_empty() && alive();
             if alive()
@@ -748,8 +998,6 @@ pub fn worker(
                 let empty = lines.is_empty();
                 if !empty {
                     data.lyrics = Arc::new(lines);
-                } else {
-                    data.lyrics = Arc::new(vec![]);
                 }
                 let server_retry = if empty { retry_at() } else { None };
                 data.lyrics_retry = server_retry.or_else(|| {
@@ -757,7 +1005,7 @@ pub fn worker(
                         std::time::Instant::now() + std::time::Duration::from_secs(NEGATIVE_TTL)
                     })
                 });
-                data.lyrics_loaded = server_retry.is_none();
+                data.lyrics_loaded = !data.lyrics.is_empty() || server_retry.is_none();
                 crate::media::notify(&notify);
             }
             if persist && let Some(path) = &disk_path {
@@ -770,6 +1018,96 @@ pub fn worker(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn lyricsfile_word_timing_uses_utf16_positions_and_preserves_gaps() {
+        let record = serde_json::json!({"lyricsfile": "version: '1.0'\nlines:\n- text: 'Hi world'\n  start_ms: 1000\n  end_ms: 5000\n  words:\n  - {text: 'Hi ', start_ms: 1000, end_ms: 2000}\n  - {text: world, start_ms: 3000, end_ms: 5000}\n"});
+        let lines = parse_record(&record);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].words.len(), 2);
+        assert_eq!(lines[0].sung_units(0.9, 9.), 0.);
+        assert_eq!(lines[0].sung_units(2.5, 9.), 3.);
+        assert_eq!(lines[0].sung_units(4., 9.), 5.5);
+        assert_eq!(lines[0].sung_units(5., 9.), 8.);
+        let malformed = serde_json::json!({"lyricsfile": "version: '9.0'\nlines: []", "syncedLyrics": "[00:01]Fallback"});
+        assert_eq!(parse_record(&malformed)[0].text, "Fallback");
+    }
+    #[test]
+    fn old_cache_lines_deserialize_without_fabricated_word_timings() {
+        let line: Line = serde_json::from_str(r#"{"at":1.0,"text":"Hi 🎵"}"#).unwrap();
+        assert!(line.words.is_empty());
+        assert_eq!(line.sung_units(2., 3.), 2.5);
+        assert!(
+            parse("[00:01]First\n[00:02]\n[00:03]Next")[1]
+                .text
+                .is_empty()
+        );
+    }
+    #[test]
+    fn legacy_cache_refresh_does_not_discard_usable_lyrics() {
+        let path = std::env::temp_dir().join(format!(
+            "horizon-legacy-karaoke-{}.json",
+            std::process::id()
+        ));
+        crate::lyrics_disk::write(
+            &path,
+            &[crate::lyrics_disk::Record {
+                format_version: 0,
+                title: "Legacy karaoke fixture".into(),
+                artist: "Fixture artist".into(),
+                duration: 120,
+                expires: crate::lyrics_disk::now() + 300,
+                lines: vec![Line {
+                    at: 1.,
+                    text: "Keep this cached line".into(),
+                    ..Default::default()
+                }],
+            }],
+        )
+        .unwrap();
+        load_disk_cache(&path);
+        assert!(needs_refresh(
+            "Legacy karaoke fixture",
+            "Fixture artist",
+            120.
+        ));
+        store_cache(
+            "Legacy karaoke fixture",
+            "Fixture artist",
+            121.,
+            vec![Line {
+                at: 1.,
+                text: "Updated duration".into(),
+                ..Default::default()
+            }],
+        );
+        assert!(!needs_refresh(
+            "Legacy karaoke fixture",
+            "Fixture artist",
+            121.
+        ));
+        store_cache("Legacy karaoke fixture", "Fixture artist", 120., Vec::new());
+        assert!(
+            !cached("Legacy karaoke fixture", "Fixture artist", 120.)
+                .unwrap()
+                .is_empty()
+        );
+        store_cache(
+            "Legacy karaoke fixture",
+            "Fixture artist",
+            120.,
+            vec![Line {
+                at: 1.,
+                text: "Refreshed".into(),
+                ..Default::default()
+            }],
+        );
+        assert!(!needs_refresh(
+            "Legacy karaoke fixture",
+            "Fixture artist",
+            120.
+        ));
+        let _ = std::fs::remove_file(path);
+    }
     #[test]
     fn exact_lookup_precedes_search_even_without_duration_and_preserves_band_names() {
         let paths = exact_paths("Song", "AC/DC", 0.);
@@ -802,10 +1140,12 @@ mod tests {
         let lines = vec![Line {
             at: 1.,
             text: "Cache fixture".into(),
+            ..Default::default()
         }];
         crate::lyrics_disk::write(
             &path,
             &[crate::lyrics_disk::Record {
+                format_version: 2,
                 title: "Disk cache fixture".into(),
                 artist: "Artist".into(),
                 duration: 200,

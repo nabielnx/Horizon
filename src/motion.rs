@@ -1,10 +1,12 @@
 use std::time::{Duration, Instant};
 
 pub const FRAME: Duration = Duration::from_nanos(8_333_333);
-pub const HOVER: f32 = 0.18;
+pub const HOVER: f32 = 0.20;
 pub const PRESS: f32 = 0.09;
-pub const STATE: f32 = 0.22;
-pub const CONTENT: f32 = 0.16;
+pub const STATE: f32 = 0.26;
+pub const CONTENT: f32 = 0.22;
+pub const PAGE: f32 = 0.30;
+pub const SHELL: f32 = 0.28;
 
 /// Retarget from the visible value, including rapid pointer reversals.
 pub struct Tween {
@@ -12,6 +14,7 @@ pub struct Tween {
     target: f32,
     started: Instant,
     duration: f32,
+    velocity: f32,
 }
 impl Tween {
     pub fn new(value: f32, now: Instant) -> Self {
@@ -20,19 +23,41 @@ impl Tween {
             target: value,
             started: now,
             duration: STATE,
+            velocity: 0.,
         }
     }
     pub fn sample(&self, now: Instant) -> f32 {
-        let t = (now.saturating_duration_since(self.started).as_secs_f32() / self.duration)
-            .clamp(0., 1.);
-        self.from + (self.target - self.from) * ease(t)
+        self.state(now).0
+    }
+    fn state(&self, now: Instant) -> (f32, f32) {
+        let t = now.saturating_duration_since(self.started).as_secs_f32();
+        if t >= self.duration * 1.5 {
+            return (self.target, 0.);
+        }
+        let omega = 8. / self.duration;
+        let offset = self.from - self.target;
+        let c = self.velocity + omega * offset;
+        let decay = (-omega * t).exp();
+        let value = self.target + (offset + c * t) * decay;
+        let velocity = (self.velocity - omega * c * t) * decay;
+        // Shared channels also drive opacity and progress; never exceed bounds.
+        let low = self.from.min(self.target).min(0.);
+        let high = self.from.max(self.target).max(1.);
+        if value < low || value > high {
+            (value.clamp(low, high), 0.)
+        } else {
+            (value, velocity)
+        }
     }
     pub fn retarget(&mut self, value: f32, duration: f32, enabled: bool, now: Instant) -> f32 {
         if !enabled {
             self.from = value;
             self.target = value;
+            self.velocity = 0.;
         } else if self.target != value {
-            self.from = self.sample(now);
+            let (visible, velocity) = self.state(now);
+            self.from = visible;
+            self.velocity = velocity;
             self.target = value;
             self.started = now;
             self.duration = duration.max(0.001);
@@ -41,7 +66,7 @@ impl Tween {
     }
     pub fn active(&self, now: Instant) -> bool {
         self.from != self.target
-            && now.saturating_duration_since(self.started).as_secs_f32() < self.duration
+            && now.saturating_duration_since(self.started).as_secs_f32() < self.duration * 1.5
     }
 }
 
@@ -124,6 +149,47 @@ pub fn mix(a: u32, b: u32, t: f32) -> u32 {
         .sum()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GlowBlob {
+    pub x: f32,
+    pub y: f32,
+    pub radius_x: f32,
+    pub radius_y: f32,
+    pub opacity: f32,
+}
+
+/// Independent smooth random paths. Sampling never mutates RNG state, so
+/// drawing the same phase is stable across pause, extra repaints and resizing.
+pub fn glow_blobs(seconds: f64, seed: u64) -> [GlowBlob; 3] {
+    fn random(seed: u64, stream: u64, index: u64) -> f64 {
+        let mut n = seed
+            .wrapping_add(stream.wrapping_mul(0x9e3779b97f4a7c15))
+            .wrapping_add(index.wrapping_mul(0xbf58476d1ce4e5b9));
+        n = (n ^ (n >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+        n = (n ^ (n >> 27)).wrapping_mul(0x94d049bb133111eb);
+        ((n ^ (n >> 31)) >> 11) as f64 / ((1_u64 << 53) - 1) as f64
+    }
+    let seconds = seconds.max(0.);
+    std::array::from_fn(|i| {
+        let stream = i as u64 * 8;
+        let sample = |channel: u64, duration: f64| {
+            let phase = seconds / duration + random(seed, stream + channel, u64::MAX) * 5.;
+            let index = phase.floor() as u64;
+            let t = phase.fract();
+            let t = t * t * t * (t * (t * 6. - 15.) + 10.);
+            (random(seed, stream + channel, index) * (1. - t)
+                + random(seed, stream + channel, index + 1) * t) as f32
+        };
+        GlowBlob {
+            x: 0.12 + sample(0, 12. + i as f64 * 3.) * 0.76,
+            y: 0.08 + sample(1, 15. + i as f64 * 2.) * 0.84,
+            radius_x: 0.55 + sample(2, 19.) * 0.24,
+            radius_y: 0.48 + sample(3, 23.) * 0.25,
+            opacity: 0.26 + sample(4, 17.) * 0.10,
+        }
+    })
+}
+
 /// One waitable timer in the UI message pump. No worker thread, polling loop,
 /// process-wide timer resolution change, or timer wakeups while static.
 pub struct FrameClock(windows::Win32::Foundation::HANDLE);
@@ -163,6 +229,26 @@ impl Drop for FrameClock {
 mod tests {
     use super::*;
     #[test]
+    fn glow_paths_are_stable_random_smooth_and_bounded() {
+        let start = glow_blobs(0., 42);
+        assert_ne!(start, glow_blobs(0., 43));
+        assert_eq!(glow_blobs(23., 42), glow_blobs(23., 42));
+        for second in [0., 11.999, 12., 14.999, 15., 23., 1200.] {
+            let a = glow_blobs(second, 42);
+            let b = glow_blobs(second + 1. / 120., 42);
+            for (a, b) in a.into_iter().zip(b) {
+                assert!((0.12..=0.88).contains(&a.x));
+                assert!((0.08..=0.92).contains(&a.y));
+                assert!((0.55..=0.79).contains(&a.radius_x));
+                assert!((0.48..=0.73).contains(&a.radius_y));
+                assert!((0.26..=0.36).contains(&a.opacity));
+                assert!((a.x - b.x).abs() < 0.002 && (a.y - b.y).abs() < 0.002);
+                assert!((a.radius_x - b.radius_x).abs() < 0.001);
+            }
+        }
+        assert_ne!(start, glow_blobs(8., 42));
+    }
+    #[test]
     fn interaction_reverses_without_jumping_and_stops() {
         let start = Instant::now();
         let mut value = Tween::new(0., start);
@@ -172,11 +258,30 @@ mod tests {
         assert!(visible > 0. && visible < 1.);
         assert_eq!(value.retarget(0., HOVER, true, halfway), visible);
         assert!(value.active(halfway));
-        let end = halfway + Duration::from_millis(200);
+        let end = halfway + Duration::from_millis(320);
         assert_eq!(value.sample(end), 0.);
         assert!(!value.active(end));
         assert_eq!(value.retarget(1., STATE, false, end), 1.);
         assert!(!value.active(end));
+    }
+    #[test]
+    fn spring_retarget_preserves_velocity_and_is_frame_rate_independent() {
+        let start = Instant::now();
+        let mut value = Tween::new(0., start);
+        value.retarget(1., HOVER, true, start);
+        let reverse = start + Duration::from_millis(35);
+        let before = value.state(reverse);
+        value.retarget(0., HOVER, true, reverse);
+        let after = value.state(reverse);
+        assert!((before.0 - after.0).abs() < 0.00001);
+        assert!((before.1 - after.1).abs() < 0.00001);
+        for hz in [30, 60, 120, 144] {
+            for frame in 0..hz {
+                let t = reverse + Duration::from_secs_f64(frame as f64 / hz as f64);
+                assert!((0. ..=1.).contains(&value.sample(t)));
+            }
+            assert_eq!(value.sample(reverse + Duration::from_secs(1)), 0.);
+        }
     }
     #[test]
     fn cubic_ease_is_monotonic_and_bounded() {

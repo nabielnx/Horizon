@@ -3,10 +3,90 @@
 use crate::*;
 use windows::Win32::UI::Controls::{EM_SETCUEBANNER, EM_SETLIMITTEXT, EM_SETMARGINS};
 
+pub(super) struct BufferedPainting;
+impl BufferedPainting {
+    pub fn new() -> Result<Self> {
+        unsafe {
+            windows::Win32::UI::Controls::BufferedPaintInit()?;
+        }
+        Ok(Self)
+    }
+}
+impl Drop for BufferedPainting {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = windows::Win32::UI::Controls::BufferedPaintUnInit();
+        }
+    }
+}
+
+/// GDI's dark EDIT background has zero alpha on an extended DWM frame.
+/// Retain the native text/selection/IME renderer, then make its buffer opaque.
+pub(super) unsafe fn paint_opaque(edit: HWND, original: WNDPROC) -> bool {
+    use windows::Win32::UI::Controls::*;
+    unsafe {
+        if !GetUpdateRect(edit, None, false).as_bool() {
+            return false;
+        }
+        let mut client = RECT::default();
+        if GetClientRect(edit, &mut client).is_err() {
+            return false;
+        }
+        let mut paint = PAINTSTRUCT::default();
+        let dc = BeginPaint(edit, &mut paint);
+        let mut buffered_dc = HDC::default();
+        let buffer = BeginBufferedPaint(dc, &client, BPBF_TOPDOWNDIB, None, &mut buffered_dc);
+        let target = if buffer != 0 { buffered_dc } else { dc };
+        CallWindowProcW(
+            original,
+            edit,
+            WM_PRINTCLIENT,
+            WPARAM(target.0 as usize),
+            LPARAM((PRF_CLIENT | PRF_ERASEBKGND) as isize),
+        );
+        if buffer != 0 {
+            let _ = BufferedPaintSetAlpha(buffer, None, 255);
+            let _ = EndBufferedPaint(buffer, true);
+        }
+        let _ = EndPaint(edit, &paint);
+        true
+    }
+}
+
+/// Some EDIT operations draw directly before invalidating. Repaint through the
+/// opaque buffer before returning to composition, including drag selection.
+pub(super) unsafe fn refresh_opaque(edit: HWND, message: u32) {
+    use windows::Win32::UI::Controls::{EM_REPLACESEL, EM_SETSEL};
+    if matches!(
+        message,
+        WM_CHAR
+            | WM_KEYDOWN
+            | WM_KEYUP
+            | WM_LBUTTONDOWN
+            | WM_LBUTTONUP
+            | WM_MOUSEMOVE
+            | WM_SETFOCUS
+            | WM_KILLFOCUS
+            | WM_SETTEXT
+            | WM_CUT
+            | WM_CLEAR
+            | WM_PASTE
+            | WM_UNDO
+            | WM_HSCROLL
+            | EM_SETSEL
+            | EM_REPLACESEL
+    ) {
+        unsafe {
+            let _ = InvalidateRect(Some(edit), None, false);
+            let _ = UpdateWindow(edit);
+        }
+    }
+}
+
 pub(super) const FIELD: u32 = 0x12151a;
 pub(super) const FIELD_COLORREF: COLORREF = COLORREF(0x001a1512);
-pub(super) const TASK_FIELD: u32 = 0x141d17;
-pub(super) const TASK_FIELD_COLORREF: COLORREF = COLORREF(0x00171d14);
+pub(super) const TASK_FIELD: u32 = 0x181b20;
+pub(super) const TASK_FIELD_COLORREF: COLORREF = COLORREF(0x00201b18);
 pub(super) const TEXT_COLORREF: COLORREF = COLORREF(0x00f6f4f2);
 
 #[derive(Clone, Copy, Debug, PartialEq)]

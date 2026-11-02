@@ -22,6 +22,7 @@ pub(super) unsafe fn prepare_first_frame(hwnd: HWND, w: &mut Window) -> Result<(
             hwnd,
             bounds.right as u32,
             bounds.bottom as u32,
+            w.alpha_shell,
         )?);
         w.paint()?;
         if !w.canvas.as_ref().is_some_and(Canvas::has_frame) {
@@ -46,6 +47,7 @@ pub(super) unsafe fn begin_transition(w: &mut Window, shell: bool, duration: f32
                 started: Instant::now(),
                 duration,
                 shell,
+                direction: 0.,
             });
     } else {
         w.overlay = None;
@@ -53,7 +55,7 @@ pub(super) unsafe fn begin_transition(w: &mut Window, shell: bool, duration: f32
 }
 pub(super) unsafe fn animate(_hwnd: HWND, w: &mut Window) {
     unsafe {
-        begin_transition(w, true, 0.28);
+        begin_transition(w, true, motion::SHELL);
     }
     if !w.expanded {
         w.preview_worker = None;
@@ -74,6 +76,11 @@ pub(super) unsafe fn animate(_hwnd: HWND, w: &mut Window) {
 }
 pub(super) fn frame_interval(w: &Window) -> Option<Duration> {
     let state = w.shared.borrow();
+    if w.settings {
+        return (state.data.settings.motion
+            && (w.overlay.is_some() || w.canvas.as_ref().is_some_and(Canvas::glass_animating)))
+        .then_some(motion::FRAME);
+    }
     let now = Instant::now();
     let target = if w.expanded { 1. } else { 0. };
     let target_peek = if w.expanded || w.mode == shell_policy::Mode::Peek {
@@ -110,15 +117,48 @@ pub(super) fn frame_interval(w: &Window) -> Option<Duration> {
         } else {
             Duration::from_millis(250)
         })
+    } else if state.data.settings.motion
+        && !w.expanded
+        && w.mode == shell_policy::Mode::Compact
+        && w.battery.energized()
+    {
+        Some(Duration::from_millis(33))
     } else {
         None
     }
 }
 pub(super) unsafe fn frame_step(hwnd: HWND, w: &mut Window) {
+    if w.settings {
+        if w.overlay.as_ref().is_some_and(|overlay| {
+            !w.shared.borrow().data.settings.motion
+                || overlay.started.elapsed().as_secs_f32() >= overlay.duration
+        }) {
+            w.overlay = None;
+        }
+        unsafe {
+            let _ = InvalidateRect(Some(hwnd), None, false);
+            let _ = UpdateWindow(hwnd);
+        }
+        return;
+    }
     let now = Instant::now();
     let dt = w.frame_tick.elapsed().as_secs_f32().min(0.05);
     w.frame_tick = now;
     let motion = w.shared.borrow().data.settings.motion;
+    if motion && w.expanded && w.page == 0 {
+        let state = w.shared.borrow();
+        if state.data.settings.album_colors
+            && state.data.settings.show_lyrics
+            && state.media.as_ref().is_some_and(|media| {
+                media
+                    .snapshot
+                    .lock()
+                    .is_ok_and(|track| track.playing && track.palette.is_some())
+            })
+        {
+            w.lyric_glow_phase += f64::from(dt);
+        }
+    }
     if w.feedback
         .is_some_and(|(_, start)| !motion || start.elapsed().as_millis() >= 350)
     {

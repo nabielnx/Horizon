@@ -2,6 +2,7 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 mod artwork;
 mod calendar;
+mod cover_fallback;
 mod figma_ui;
 mod focus_ui;
 mod host;
@@ -15,14 +16,17 @@ mod media;
 mod model;
 mod motion;
 mod polish_checks;
+mod power;
 mod probes;
 mod reminders;
 mod render;
 mod settings_icons;
+mod settings_ui;
 mod shelf;
 mod shelf_ui;
 mod shell_policy;
 mod startup;
+mod taskbar;
 mod tasks_ui;
 mod ui;
 use chrono::{Local, TimeZone};
@@ -100,6 +104,7 @@ enum Action {
     Media(u8),
     Seek,
     Favorite,
+    CoverSource,
     Drink,
     DrinkAmount(u32),
     ResetWater,
@@ -161,12 +166,23 @@ struct Shared {
 struct Window {
     shared: Rc<RefCell<Shared>>,
     canvas: Option<Canvas>,
+    alpha_shell: bool,
     settings: bool,
     expanded: bool,
     hovered: bool,
     hover_tick: Option<Instant>,
     mode: shell_policy::Mode,
     idle_transition: Option<shell_policy::Transition>,
+    cover_render_error: RefCell<String>,
+    battery: power::Battery,
+    battery_checked: Instant,
+    battery_phase: Instant,
+    power_notice: Option<power::Notice>,
+    power_notification: Option<power::Notification>,
+    taskbar_watch: Option<taskbar::ForegroundWatch>,
+    power_changes: u64,
+    last_power_change: Option<power::ConnectionChange>,
+    compact_activity: figma_ui::CompactActivity,
     last_policy_check: Instant,
     page: usize,
     hits: Vec<Hit>,
@@ -175,6 +191,8 @@ struct Window {
     input_layout: Option<[i32; 8]>,
     calendar: calendar::Calendar,
     palette: motion::Palette,
+    lyric_glow_phase: f64,
+    lyric_glow_seed: u64,
     lyric_key: Option<String>,
     overlay: Option<Overlay>,
     expansion_velocity: f32,
@@ -245,6 +263,7 @@ struct Overlay {
     started: Instant,
     duration: f32,
     shell: bool,
+    direction: f32,
 }
 const INK: u32 = 0xf2f4f6;
 const MUTED: u32 = 0x8e9aa7;
@@ -267,6 +286,9 @@ fn parse_task(input: &str) -> (String, Option<i64>) {
 }
 const EXPANDED_HEIGHT: i32 = 280;
 const EXPANDED_RADIUS: f32 = 32.;
+fn expanded_radius(settings: &Settings) -> f32 {
+    (EXPANDED_RADIUS + (settings.radius - 21) as f32).clamp(14., 48.)
+}
 const AGENDA_PAGE_SIZE: usize = 2;
 fn panel_height(_s: &Settings) -> i32 {
     EXPANDED_HEIGHT
@@ -389,19 +411,16 @@ unsafe fn apply_frame(hwnd: HWND, w: &mut Window) {
     }
     let _ = InvalidateRect(Some(hwnd), None, false);
 }
-pub(crate) unsafe fn region(hwnd: HWND, w: &Window) {
+fn shell_outline(w: &Window) -> render::ShellOutline {
     let s = &w.shared.borrow().data.settings;
     let p = w.expansion;
-    if w.mode == shell_policy::Mode::Hidden && p <= 0.0001 {
-        return;
-    }
     let full_w = s.width as f32;
     let full_h = if w.page <= 2 {
         host_height()
     } else {
         panel_height(s)
     } as f32;
-    let radius = 37. * (1. - p) + EXPANDED_RADIUS * p;
+    let radius = 37. * (1. - p) + expanded_radius(s) * p;
 
     let idle = w.idle_geometry();
     let width = idle.width + (full_w - idle.width) * p;
@@ -410,13 +429,34 @@ pub(crate) unsafe fn region(hwnd: HWND, w: &Window) {
     // Compact's exported shoulder is 9px; peek has straight sides. Expansion
     // alone cannot distinguish those two contours, so include the peek phase.
     let shape = idle.shape + (1. - idle.shape) * p;
-    let raw_points: Vec<POINT> = layout::contour(width, height, shape, radius)
-        .into_iter()
-        .map(|(x, y)| POINT {
-            x: (x + offset).round() as i32,
-            y: y.round() as i32,
-        })
-        .collect();
+    render::ShellOutline {
+        width,
+        height,
+        shape,
+        radius,
+        offset,
+    }
+}
+pub(crate) unsafe fn region(hwnd: HWND, w: &Window) {
+    if w.mode == shell_policy::Mode::Hidden && w.expansion <= 0.0001 {
+        return;
+    }
+    let outline = shell_outline(w);
+    // Win32 regions only contain whole pixels. Leave a one-pixel guard around
+    // the antialiased mask instead of cutting away its fractional coverage.
+    let guard = if w.alpha_shell { 1. } else { 0. };
+    let raw_points: Vec<POINT> = layout::contour(
+        outline.width + guard * 2.,
+        outline.height + guard,
+        outline.shape,
+        outline.radius + guard,
+    )
+    .into_iter()
+    .map(|(x, y)| POINT {
+        x: (x + outline.offset - guard).round() as i32,
+        y: y.round() as i32,
+    })
+    .collect();
     let mut points: Vec<POINT> = Vec::with_capacity(raw_points.len());
     for pt in raw_points {
         if points
@@ -454,9 +494,42 @@ fn set_mode(w: &mut Window, next: shell_policy::Mode) {
     let from = w.idle_geometry();
     let settings = &w.shared.borrow().data.settings;
     let to = next.idle_geometry(settings.width as f32);
-    w.idle_transition = (settings.motion && from != to)
-        .then(|| shell_policy::Transition::new(from, to, Instant::now()));
+    if settings.motion && from != to {
+        if let Some(transition) = &mut w.idle_transition {
+            transition.retarget(to, Instant::now());
+        } else {
+            w.idle_transition = Some(shell_policy::Transition::new(from, to, Instant::now()));
+        }
+    } else {
+        w.idle_transition = None;
+    }
     w.mode = next;
+}
+fn update_battery(w: &mut Window, next: power::Battery) -> bool {
+    w.battery_checked = Instant::now();
+    if next == w.battery {
+        return false;
+    }
+    if let Some(change) = w.battery.connection_change(next) {
+        w.power_notice = Some(power::Notice::new(change, next.percent, Instant::now()));
+        w.battery_phase = Instant::now();
+        w.power_changes += 1;
+        w.last_power_change = Some(change);
+        w.overlay = None;
+    }
+    w.battery = next;
+    true
+}
+fn sync_compact_activity(w: &mut Window) {
+    let state = w.shared.borrow();
+    let track = state
+        .media
+        .as_ref()
+        .and_then(|media| media.snapshot.lock().ok().map(|track| track.clone()))
+        .unwrap_or_default();
+    w.compact_activity
+        .observe_track(&track, state.running.is_some());
+    w.compact_activity.observe_alert(state.alert.as_ref());
 }
 unsafe fn desired_mode(hwnd: HWND, w: &Window) -> shell_policy::Mode {
     let fg = shell_policy::foreground(hwnd, w.shared.borrow().settings_window);
@@ -474,7 +547,7 @@ unsafe fn desired_mode(hwnd: HWND, w: &Window) -> shell_policy::Mode {
         fullscreen: fg.fullscreen,
         lyrics_pinned: state.data.settings.show_lyrics && playing,
         hide_fullscreen: true,
-        has_alert: state.alert.is_some(),
+        has_alert: state.alert.is_some() || w.power_notice.is_some(),
     };
     drop(state);
     shell_policy::decide(inputs)
@@ -504,6 +577,26 @@ pub(crate) unsafe fn update_policy(hwnd: HWND, w: &mut Window) {
             apply_frame(hwnd, w);
         }
         let _ = InvalidateRect(Some(hwnd), None, false);
+    }
+    if w.shared.borrow().data.settings.taskbar_layout && w.mode != shell_policy::Mode::Hidden {
+        let bar = taskbar::primary();
+        let mut bounds = RECT::default();
+        if GetWindowRect(hwnd, &mut bounds).is_ok() && bounds.top != 0 {
+            apply_frame(hwnd, w);
+        }
+        if let Some((bar, _)) = bar
+            && taskbar::above(bar, hwnd)
+        {
+            let _ = SetWindowPos(
+                hwnd,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+        }
     }
 }
 unsafe fn persist(w: &Window) -> bool {
@@ -638,7 +731,17 @@ unsafe fn action(hwnd: HWND, w: &mut Window, a: Action) {
         .or_else(|| w.hits.iter().find(|h| h.action == a))
         && let Some(canvas) = &w.canvas
     {
-        canvas.pulse((hit.x, hit.y, hit.w, hit.h));
+        let (scale, offset) = if w.settings {
+            (1., 0.)
+        } else {
+            w.figma_transform()
+        };
+        canvas.pulse((
+            ((hit.x as f32 - offset) / scale).round() as i32,
+            hit.y,
+            (hit.w as f32 / scale).round() as i32,
+            hit.h,
+        ));
     }
     if !w.settings
         && matches!(
@@ -668,6 +771,17 @@ unsafe fn action(hwnd: HWND, w: &mut Window, a: Action) {
         begin_transition(w, false, motion::CONTENT);
     }
     match a {
+        Action::CoverSource => {
+            let link = w.shared.borrow().media.as_ref().and_then(|m| {
+                m.snapshot
+                    .lock()
+                    .ok()
+                    .and_then(|t| t.cover_source_url.clone())
+            });
+            if let Some(link) = link {
+                let _ = calendar::open_url(hwnd, &link);
+            }
+        }
         Action::Settings => {
             let _ = create(w.shared.clone(), true, w.offscreen);
         }
@@ -692,8 +806,11 @@ unsafe fn action(hwnd: HWND, w: &mut Window, a: Action) {
             let _ = PostMessageW(None, WM_QUIT, WPARAM(0), LPARAM(0));
         }
         Action::Page(p) => {
-            if !w.settings && w.page != p {
-                begin_transition(w, false, motion::STATE);
+            if w.page != p {
+                begin_transition(w, false, motion::PAGE);
+                if let Some(overlay) = &mut w.overlay {
+                    overlay.direction = if p > w.page { -1. } else { 1. };
+                }
             }
             if w.page == 5 && p != 5 {
                 w.preview_worker = None;
@@ -1215,10 +1332,20 @@ unsafe fn action(hwnd: HWND, w: &mut Window, a: Action) {
                 let _ = m.send.send(media::Command::LyricsChanged);
             }
             if k == 4 {
+                // Motion changes also wake the main shell.
                 let root = w.shared.borrow().notch;
                 if !root.is_invalid() {
                     let _ = PostMessageW(Some(root), WM_APP + 8, WPARAM(0), LPARAM(0));
                 }
+            }
+            if k == 18
+                && let Some(media) = &w.shared.borrow().media
+            {
+                media.cover_fallback_enabled.store(
+                    w.shared.borrow().data.settings.cover_fallback,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                let _ = media.send.send(media::Command::Refresh);
             }
         }
     }
@@ -1240,6 +1367,7 @@ unsafe fn action(hwnd: HWND, w: &mut Window, a: Action) {
         persist(w);
     }
     let root = w.shared.borrow().notch;
+    sync_compact_activity(w);
     if w.settings && !root.is_invalid() {
         let _ = PostMessageW(Some(root), WM_APP + 5, WPARAM(0), LPARAM(0));
     }
@@ -1269,7 +1397,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                         (s.width, host_height())
                     }
                 };
-                w.canvas = Canvas::new(hwnd, size.0 as u32, size.1 as u32).ok();
+                w.canvas = Canvas::new(hwnd, size.0 as u32, size.1 as u32, w.alpha_shell).ok();
             }
             if w.paint().is_err() {
                 w.canvas = None;
@@ -1380,6 +1508,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             let _ = InvalidateRect(Some(hwnd), None, false);
             let x = (lp.0 as u16) as i16 as i32;
             let y = ((lp.0 >> 16) as u16) as i16 as i32;
+            w.pointer = (x, y);
+            // Present the physical press before a fast release can overtake it.
+            let _ = UpdateWindow(hwnd);
             if let Some(h) = w.hits.iter().find(|h| {
                 x >= h.x
                     && x < h.x + h.w
@@ -1561,7 +1692,30 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             LRESULT(0)
         }
         m if m == WM_APP + 9 => {
+            sync_compact_activity(w);
             let _ = InvalidateRect(Some(hwnd), None, false);
+            LRESULT(0)
+        }
+        m if m == WM_APP + 12 => {
+            let _ = probes::running_media_diagnostics(w);
+            LRESULT(0)
+        }
+        m if m == WM_APP + 13 => {
+            if !w.settings && !w.shared.borrow().data.settings.taskbar_layout {
+                action(hwnd, w, Action::Setting(17, 1));
+            }
+            LRESULT(0)
+        }
+        m if m == WM_APP + 14 => {
+            if !w.settings {
+                update_policy(hwnd, w);
+            }
+            LRESULT(0)
+        }
+        m if m == WM_APP + 15 => {
+            if !w.settings && !w.shared.borrow().data.settings.cover_fallback {
+                action(hwnd, w, Action::Setting(18, 1));
+            }
             LRESULT(0)
         }
         m if m == WM_APP + 10 => {
@@ -1688,10 +1842,24 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             LRESULT(0)
         }
         WM_TIMER => {
+            let mut power_changed = false;
+            if w.power_notice
+                .as_ref()
+                .is_some_and(|notice| notice.expired(Instant::now()))
+            {
+                w.power_notice = None;
+                power_changed = true;
+            }
+            if !w.settings && !w.offscreen && w.battery_checked.elapsed().as_secs() >= 1 {
+                w.battery_checked = Instant::now();
+                if let Some(battery) = power::Battery::read() {
+                    power_changed |= update_battery(w, battery);
+                }
+            }
             let mut s = w.shared.borrow_mut();
             record_focus(&mut s);
             let minute = Local::now().timestamp() / 60;
-            let mut changed = (w.expanded && w.page == 0) || minute != w.minute;
+            let mut changed = power_changed || (w.expanded && w.page == 0) || minute != w.minute;
             w.minute = minute;
             s.data.reset_day();
             if s.running.is_some() {
@@ -1729,6 +1897,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 changed = true;
             }
             drop(s);
+            sync_compact_activity(w);
             if !w.settings {
                 update_policy(hwnd, w);
             }
@@ -1736,6 +1905,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 let _ = InvalidateRect(Some(hwnd), None, false);
             }
             LRESULT(0)
+        }
+        WM_POWERBROADCAST => {
+            if !w.settings
+                && !w.offscreen
+                && let Some(battery) = power::Battery::read()
+            {
+                update_battery(w, battery);
+                update_policy(hwnd, w);
+                let _ = InvalidateRect(Some(hwnd), None, false);
+            }
+            LRESULT(1)
         }
         WM_CLOSE => {
             if w.settings {
@@ -1796,12 +1976,27 @@ unsafe fn create(shared: Rc<RefCell<Shared>>, settings: bool, offscreen: bool) -
     let w = Box::new(Window {
         shared,
         canvas: None,
+        alpha_shell: false,
         settings,
         expanded: false,
         hovered: false,
         hover_tick: None,
         mode: shell_policy::Mode::Compact,
         idle_transition: None,
+        cover_render_error: RefCell::new(String::new()),
+        battery: if offscreen {
+            power::Battery::default()
+        } else {
+            power::Battery::read().unwrap_or_default()
+        },
+        battery_checked: Instant::now(),
+        battery_phase: Instant::now(),
+        power_notice: None,
+        power_notification: None,
+        taskbar_watch: None,
+        power_changes: 0,
+        last_power_change: None,
+        compact_activity: figma_ui::CompactActivity::default(),
         last_policy_check: Instant::now(),
         page: if settings { 0 } else { 1 },
         hits: vec![],
@@ -1810,6 +2005,10 @@ unsafe fn create(shared: Rc<RefCell<Shared>>, settings: bool, offscreen: bool) -
         input_layout: None,
         calendar: calendar::Calendar::default(),
         palette: motion::Palette::default(),
+        lyric_glow_phase: 0.,
+        lyric_glow_seed: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos() as u64),
         lyric_key: None,
         overlay: None,
         expansion_velocity: 0.,
@@ -1878,7 +2077,21 @@ unsafe fn create(shared: Rc<RefCell<Shared>>, settings: bool, offscreen: bool) -
             .store(hwnd.0 as usize, std::sync::atomic::Ordering::Relaxed);
     }
     if !settings {
+        use windows::Win32::Graphics::Dwm::DwmExtendFrameIntoClientArea;
         use windows::Win32::Graphics::Dwm::{DWMWA_BORDER_COLOR, DwmSetWindowAttribute};
+        use windows::Win32::UI::Controls::MARGINS;
+        // Let DWM composite fractional edge coverage from the premultiplied
+        // Direct2D surface. The interior remains opaque, including native edits.
+        w.alpha_shell = DwmExtendFrameIntoClientArea(
+            hwnd,
+            &MARGINS {
+                cxLeftWidth: -1,
+                cxRightWidth: -1,
+                cyTopHeight: -1,
+                cyBottomHeight: -1,
+            },
+        )
+        .is_ok();
         // Windows 11: disable the system border before the first show. Older
         // Windows versions retain the non-client message handling above.
         let no_border = COLORREF(0xfffffffe);
@@ -1890,6 +2103,8 @@ unsafe fn create(shared: Rc<RefCell<Shared>>, settings: bool, offscreen: bool) -
         );
     }
     if !settings && !offscreen {
+        w.power_notification = power::Notification::register(hwnd);
+        w.taskbar_watch = taskbar::ForegroundWatch::register(hwnd);
         unsafe {
             DragAcceptFiles(hwnd, BOOL(1));
         }
@@ -1979,6 +2194,14 @@ unsafe extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
     if let Ok(parent) = GetParent(hwnd) {
         let ptr = GetWindowLongPtrW(parent, GWLP_USERDATA) as *mut Window;
         if !ptr.is_null() {
+            if (*ptr).alpha_shell {
+                if msg == WM_ERASEBKGND {
+                    return LRESULT(1);
+                }
+                if msg == WM_PAINT && input::paint_opaque(hwnd, (*ptr).input_proc) {
+                    return LRESULT(0);
+                }
+            }
             if msg == WM_LBUTTONDOWN && (*ptr).page == 4 {
                 (*ptr).priority_open = false;
                 let _ = InvalidateRect(Some(parent), None, false);
@@ -2011,7 +2234,11 @@ unsafe extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
                 let _ = PostMessageW(Some(parent), WM_APP + 7, WPARAM(0), LPARAM(0));
                 return LRESULT(0);
             }
-            return CallWindowProcW((*ptr).input_proc, hwnd, msg, wp, lp);
+            let result = CallWindowProcW((*ptr).input_proc, hwnd, msg, wp, lp);
+            if (*ptr).alpha_shell {
+                input::refresh_opaque(hwnd, msg);
+            }
+            return result;
         }
     }
     DefWindowProcW(hwnd, msg, wp, lp)
@@ -2046,9 +2273,42 @@ impl Drop for Instance {
     }
 }
 fn run() -> Result<()> {
+    if std::env::args().any(|arg| arg == "--cover-fallback-probe") {
+        return probes::cover_fallback_diagnostics();
+    }
+    if std::env::args().any(|arg| arg == "--cover-fallback-on") {
+        unsafe {
+            PostMessageW(
+                Some(FindWindowW(w!("Horizon.Native"), w!("Horizon"))?),
+                WM_APP + 15,
+                WPARAM(0),
+                LPARAM(0),
+            )?;
+        }
+        return Ok(());
+    }
+    if std::env::args().any(|arg| arg == "--taskbar-layout-on") {
+        unsafe {
+            PostMessageW(
+                Some(FindWindowW(w!("Horizon.Native"), w!("Horizon"))?),
+                WM_APP + 13,
+                WPARAM(0),
+                LPARAM(0),
+            )?;
+        }
+        return Ok(());
+    }
+    if std::env::args().any(|arg| arg == "--inspect-running-media") {
+        unsafe {
+            let hwnd = FindWindowW(w!("Horizon.Native"), w!("Horizon"))?;
+            PostMessageW(Some(hwnd), WM_APP + 12, WPARAM(0), LPARAM(0))?;
+        }
+        return Ok(());
+    }
     if std::env::args().any(|a| a == "--media-probe") {
         return probes::media_diagnostics();
     }
+    let _buffered_paint = input::BufferedPainting::new()?;
     let _instance = if !std::env::args().any(|a| a == "--offscreen") {
         unsafe {
             let handle = windows::Win32::System::Threading::CreateMutexW(
@@ -2104,7 +2364,10 @@ fn run() -> Result<()> {
         let media = if offscreen {
             None
         } else {
-            Some(media::Media::start(data.settings.show_lyrics))
+            Some(media::Media::start(
+                data.settings.show_lyrics,
+                data.settings.cover_fallback,
+            ))
         };
         let shared = Rc::new(RefCell::new(Shared {
             alert: data.reminders.current(),
@@ -2206,6 +2469,7 @@ fn run() -> Result<()> {
                 root,
                 (*raw).shared.borrow().data.settings.width as u32,
                 host_height() as u32,
+                (*raw).alpha_shell,
             )?);
             (*raw).paint()?;
             if std::env::args().any(|a| a == "--settings") {
@@ -2214,7 +2478,7 @@ fn run() -> Result<()> {
                 for p in 0..7 {
                     (*raw).page = p;
                     if (*raw).canvas.is_none() {
-                        (*raw).canvas = Some(Canvas::new(dialog, 710, 550)?);
+                        (*raw).canvas = Some(Canvas::new(dialog, 710, 550, false)?);
                     }
                     (*raw).paint()?;
                 }
@@ -2229,19 +2493,34 @@ fn run() -> Result<()> {
                 settings.canvas = Some(Canvas::image(710, 550)?);
                 settings.paint()?;
                 for h in &settings.hits {
+                    if h.x < 0 || h.y < 0 || h.x + h.w > 710 || h.y + h.h > 495 {
+                        return Err(Error::new(
+                            E_FAIL,
+                            "Settings action is outside its content area",
+                        ));
+                    }
                     if let Action::Setting(key, _) = h.action {
                         wired.insert(key);
                     }
                 }
             }
-            if wired != (0..17).collect() {
+            settings.pointer = (30, 110);
+            settings.paint()?;
+            if frame_interval(settings).is_none() {
+                return Err(Error::new(
+                    E_FAIL,
+                    "Settings hover did not schedule animation frames",
+                ));
+            }
+            settings.pointer = (-1, -1);
+            if wired != (0..19).collect() {
                 return Err(Error::new(E_FAIL, "Some settings controls are missing"));
             }
             // Exercise a width change below the configured maximum, including
             // when the current default already starts at that maximum.
             shared.borrow_mut().data.settings.width = 591;
             let before = shared.borrow().data.settings.width;
-            for key in 0..17 {
+            for key in 0..19 {
                 action(dialog, settings, Action::Setting(key, 1));
             }
             let store = shared.borrow().store.clone();
@@ -2285,7 +2564,7 @@ fn run() -> Result<()> {
             std::fs::create_dir_all("artifacts").map_err(|e| Error::new(E_FAIL, e.to_string()))?;
             probes::calendar_checks(root, root_state)?;
             polish_checks::run(root, root_state)?;
-            std::fs::write("artifacts/ui-checks.json",r#"{"settings_roundtrip":true,"all_17_setting_controls_rendered":true,"native_width_and_opacity":true,"task_create_complete_delete":true,"focus_start_reset":true,"calendar_month_grid_and_form_roundtrip":true,"desktop_input_used":false,"startup_modified":false}"#).map_err(|e|Error::new(E_FAIL,e.to_string()))?;
+            std::fs::write("artifacts/ui-checks.json",r#"{"settings_roundtrip":true,"all_19_setting_controls_rendered":true,"native_width_and_opacity":true,"task_create_complete_delete":true,"focus_start_reset":true,"calendar_month_grid_and_form_roundtrip":true,"desktop_input_used":false,"startup_modified":false}"#).map_err(|e|Error::new(E_FAIL,e.to_string()))?;
         }
         let mut motion_probe = if offscreen && std::env::args().any(|a| a == "--motion-probe") {
             let w = &mut *(GetWindowLongPtrW(root, GWLP_USERDATA) as *mut Window);
@@ -2311,7 +2590,22 @@ fn run() -> Result<()> {
                 state.last_policy_check = Instant::now();
                 update_policy(root, state);
             }
-            if let Some(interval) = frame_interval(state) {
+            let settings_hwnd = state.shared.borrow().settings_window;
+            let settings_ptr =
+                if !settings_hwnd.is_invalid() && IsWindow(Some(settings_hwnd)).as_bool() {
+                    GetWindowLongPtrW(settings_hwnd, GWLP_USERDATA) as *mut Window
+                } else {
+                    std::ptr::null_mut()
+                };
+            let settings_interval = if settings_ptr.is_null() {
+                None
+            } else {
+                frame_interval(&*settings_ptr)
+            };
+            if let Some(interval) = match (frame_interval(state), settings_interval) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            } {
                 if armed.is_none() {
                     state.frame_tick = Instant::now();
                     let deadline = Instant::now() + interval;
@@ -2330,6 +2624,12 @@ fn run() -> Result<()> {
                 if result == WAIT_OBJECT_0 {
                     let previous = armed.take().unwrap_or_else(Instant::now);
                     frame_step(root, state);
+                    if settings_interval.is_some() && IsWindow(Some(settings_hwnd)).as_bool() {
+                        let live = GetWindowLongPtrW(settings_hwnd, GWLP_USERDATA) as *mut Window;
+                        if !live.is_null() {
+                            frame_step(settings_hwnd, &mut *live);
+                        }
+                    }
                     if let Some(probe) = &mut motion_probe
                         && probe.frame(root, state)?
                     {

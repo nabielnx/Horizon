@@ -2,9 +2,44 @@
 //! control the user's media player or desktop.
 use crate::*;
 
+pub(super) fn running_media_diagnostics(window: &Window) -> Result<()> {
+    let state = window.shared.borrow();
+    let track = state
+        .media
+        .as_ref()
+        .and_then(|media| media.snapshot.lock().ok().map(|track| track.clone()))
+        .unwrap_or_default();
+    let report = serde_json::json!({
+        "pid": std::process::id(), "readOnly": true, "liveInstance": true,
+        "source": track.source_app, "title": track.title, "artist": track.artist,
+        "position": track.position_now(), "duration": track.duration,
+        "coverBytes": track.cover.as_ref().map_or(0, |bytes| bytes.len()),
+        "coverError": track.cover_error, "coverAttempts": track.cover_attempts,
+        "coverRevision": track.cover_revision, "error": track.error,
+        "recentCoverFailures": track.cover_failures,
+        "coverProvider": if track.cover_source_url.is_some() { "Apple Music" } else { "Windows" },
+        "coverRenderError": window.cover_render_error.borrow().as_str(),
+        "batteryPercent": window.battery.percent, "batteryCharging": window.battery.charging,
+        "chargerConnected": window.battery.plugged, "chargerEffectActive": window.battery.energized(),
+        "powerConnectionChanges": window.power_changes, "lastPowerConnectionChange": window.last_power_change,
+        "powerNoticeVisible": window.power_notice.is_some(),
+        "powerEventsRegistered": window.power_notification.is_some(),
+        "compactContextPage": window.compact_activity.page(state.alert.as_ref().map(|alert| alert.page), state.running.is_some(), track.playing, window.page),
+        "focusRunning": state.running.is_some(),
+        "lyricLines": track.lyrics.len(), "wordTimedLines": track.lyrics.iter().filter(|line| !line.words.is_empty()).count()
+    });
+    std::fs::create_dir_all("artifacts").map_err(|e| Error::new(E_FAIL, e.to_string()))?;
+    std::fs::write(
+        "artifacts/running-media-diagnostics.json",
+        serde_json::to_vec_pretty(&report).map_err(|e| Error::new(E_FAIL, e.to_string()))?,
+    )
+    .map_err(|e| Error::new(E_FAIL, e.to_string()))?;
+    Ok(())
+}
+
 pub(super) fn media_diagnostics() -> Result<()> {
     let lyrics_network = std::env::args().any(|a| a == "--lyrics-network");
-    let media = media::Media::start(lyrics_network);
+    let media = media::Media::start(lyrics_network, false);
     let mut samples = Vec::new();
     for second in 1..=6 {
         std::thread::sleep(std::time::Duration::from_secs(1));
@@ -17,6 +52,43 @@ pub(super) fn media_diagnostics() -> Result<()> {
     std::fs::write(
         "artifacts/media-diagnostics.json",
         serde_json::to_vec_pretty(&report).map_err(|e| Error::new(E_FAIL, e.to_string()))?,
+    )
+    .map_err(|e| Error::new(E_FAIL, e.to_string()))?;
+    Ok(())
+}
+
+pub(super) fn cover_fallback_diagnostics() -> Result<()> {
+    unsafe {
+        let _ = windows::Win32::System::WinRT::RoInitialize(
+            windows::Win32::System::WinRT::RO_INIT_MULTITHREADED,
+        );
+    }
+    let media = media::Media::start(false, false);
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let track = media
+        .snapshot
+        .lock()
+        .map_err(|_| Error::new(E_FAIL, "Media snapshot unavailable"))?
+        .clone();
+    let job = crate::cover_fallback::Job {
+        key: media::track_cover_key(&track),
+        title: track.title,
+        artist: track.artist,
+        album: track.album,
+        duration: track.duration,
+    };
+    let result = crate::cover_fallback::lookup(&job, &|| true);
+    let report = match result {
+        Ok(art) => {
+            serde_json::json!({"matched":true, "bytes":art.bytes.len(), "sourceLink":art.link})
+        }
+        Err(error) => {
+            serde_json::json!({"matched":false, "error":error, "title":job.title,"artist":job.artist,"album":job.album,"duration":job.duration})
+        }
+    };
+    std::fs::write(
+        "artifacts/cover-fallback-probe.json",
+        serde_json::to_vec_pretty(&report).unwrap(),
     )
     .map_err(|e| Error::new(E_FAIL, e.to_string()))?;
     Ok(())
@@ -66,6 +138,45 @@ pub(super) unsafe fn startup_checks(hwnd: HWND, w: &mut Window) -> Result<()> {
             ));
         }
         w.idle_transition = None;
+        // Simulate AC edges at the window boundary; this does not change the
+        // machine's battery state or control another application.
+        let saved_battery = w.battery;
+        w.battery = power::Battery {
+            percent: Some(80),
+            plugged: Some(false),
+            charging: false,
+        };
+        let connected = power::Battery {
+            plugged: Some(true),
+            ..w.battery
+        };
+        if !update_battery(w, connected) || !w.battery.energized() || w.power_notice.is_none() {
+            return Err(Error::new(
+                E_FAIL,
+                "Plug-in did not activate the indicator and notice",
+            ));
+        }
+        w.mode = shell_policy::Mode::Compact;
+        w.paint()?;
+        if !update_battery(
+            w,
+            power::Battery {
+                plugged: Some(false),
+                ..connected
+            },
+        ) || w.battery.energized()
+            || w.power_changes != 2
+        {
+            return Err(Error::new(
+                E_FAIL,
+                "Unplug did not deactivate the indicator",
+            ));
+        }
+        w.paint()?;
+        w.battery = saved_battery;
+        w.power_notice = None;
+        w.power_changes = 0;
+        w.last_power_change = None;
         let mut frames = 0;
         for _ in 0..3 {
             for mode in [shell_policy::Mode::Peek, shell_policy::Mode::Compact] {
@@ -93,6 +204,7 @@ pub(super) unsafe fn startup_checks(hwnd: HWND, w: &mut Window) -> Result<()> {
             "systemBorderSuppressed": if border_supported { Some(true) } else { None },
             "hoverCycles": 3,
             "indicatorOpensDirectlyToPeek": true,
+            "plugUnplugIndicatorAndNoticesVerified": true,
             "hoverFramesRendered": frames,
             "hoverSnapshotsReadable": true
         });
@@ -145,7 +257,7 @@ impl MotionProbe {
             GetClientRect(hwnd, &mut bounds)?;
             Ok(Self {
                 last: Instant::now(),
-                samples: Vec::with_capacity(120),
+                samples: Vec::with_capacity(180),
                 width: bounds.right,
                 height: bounds.bottom,
                 snapshots: 0,
@@ -222,7 +334,9 @@ impl MotionProbe {
                 action(hwnd, w, Action::Page(0));
                 self.check_snapshot(w)?;
             }
-            if count < 120 {
+            // Include the spring's settling tail after the final page change.
+            // Do not clear interaction state to manufacture an idle result.
+            if count < 180 {
                 return Ok(false);
             }
             w.shared.borrow_mut().media = None;

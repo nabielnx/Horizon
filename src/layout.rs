@@ -140,8 +140,21 @@ fn curve(points: &mut Vec<(f32, f32)>, b: (f32, f32), c: (f32, f32), d: (f32, f3
     }
 }
 
+/// Keep the sung glyph inside the reading area, without an independent clock.
+pub fn karaoke_scroll(caret: f32, text_width: f32, viewport: f32) -> f32 {
+    (caret - viewport * 0.55).clamp(0., (text_width - viewport).max(0.))
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn karaoke_scroll_follows_the_sung_glyph_and_resets_on_seek() {
+        assert_eq!(super::karaoke_scroll(0., 600., 175.), 0.);
+        assert!(super::karaoke_scroll(300., 600., 175.) > 0.);
+        assert_eq!(super::karaoke_scroll(600., 600., 175.), 425.);
+        assert_eq!(super::karaoke_scroll(0., 600., 175.), 0.);
+        assert_eq!(super::karaoke_scroll(100., 100., 175.), 0.);
+    }
     use super::*;
     #[test]
     fn lyric_paragraphs_fit_without_overlap_and_backfill_song_edges() {

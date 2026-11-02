@@ -14,6 +14,8 @@ Horizon is pre-1.0 software. The current source version is **0.3.0**.
 - Tasks with priorities/progress and a local file shelf with previews.
 - Local settings, configurable behavior and optional start with Windows.
 - Shared waveform/motion rendering and native offscreen verification.
+- Karaoke highlighting with word timing when available, timeline-driven overflow
+  lyrics, contextual compact icons and a Windows battery/charging indicator.
 
 ## Run
 

@@ -15,6 +15,14 @@ information, including the source IP address. Its availability and data practice
 are outside Horizon's control. Disable lookup in Music settings to stop new
 requests; requests already in progress may finish.
 
+The optional **Cover cadangan (Apple)** setting sends title and artist to
+Apple's iTunes Search API over HTTPS only when Windows artwork remains missing.
+Matching checks album/version and duration locally. Matching images are fetched
+from Apple's `mzstatic.com` CDN; Apple also receives normal connection data.
+The fallback defaults off and can be disabled in Music settings. Its artwork
+cache is memory-only, limited to four images and 1 MiB. Windows artwork takes
+priority. A clickable Apple Music source link is shown when a fallback is used.
+
 Successful lyrics can be cached in `%APPDATA%\Horizon\lyrics-cache.json` for
 up to 24 hours, bounded to 32 records and 2 MiB. Close Horizon and delete that
 file to remove the persistent cache. Removing the Horizon data directory resets

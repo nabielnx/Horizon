@@ -2,6 +2,69 @@
 
 ## 0.3.0 — Unreleased
 
+- Read Windows thumbnails explicitly from byte zero, preserve validated artwork
+  through album-only metadata changes and brief missing-session gaps, and keep
+  bounded recent failure diagnostics across successful retries.
+- Add opt-in Apple/iTunes cover fallback when Windows artwork remains missing,
+  with strict recording/release matching, stale-track rejection, bounded memory
+  caching and clickable Apple Music attribution. Windows artwork has priority.
+
+- Add an opt-in top-taskbar overlay for compact, medium and expanded Horizon.
+  Foreground notifications and the existing policy refresh repair its stacking
+  order without taking focus, moving Explorer or adding an animation timer.
+
+- Rebuild all seven Settings pages with consistent white icons, neutral glass
+  cards, aligned value controls, animated switches and an automatic-save footer.
+  Settings interactions now share the UI animation clock. Radius changes affect
+  the actual shell and preview, and opacity labels identify the affected pages.
+
+- Use velocity-preserving spring motion for shared hover, press, selection and
+  progress channels, including reversible compact/medium shell transitions.
+- Add directional page transitions, animated sidebar selection/press and
+  pointer-reactive glass reflections. Correct click feedback coordinates in
+  centered/scaled views and present the initial mouse press immediately.
+
+- Repair transparent dark native inputs on the alpha shell with buffered opaque
+  EDIT painting, including typing, replacement, selection and calendar fields.
+- Use reflective silver glyphs for the medium dashboard clock. Task lists,
+  input and controls use neutral dark glass; the progress card keeps a brighter
+  green fill and stronger face/rim reflections with readable light typography.
+
+- Center the actual play glyph in medium and expanded music controls, including
+  hover/press offsets and narrower layouts.
+- Add three softly moving, cover-coloured glows behind expanded lyrics. Smooth
+  random paths reuse the existing frame clock and cached brushes; pause and
+  disabled motion freeze the effect without resetting its position.
+- Compact activity icons and artwork share a glass plate with an inset cover,
+  face reflection and one fading rim instead of stacked solid outlines.
+
+- Music transport buttons share one opaque glass surface with a fading white
+  reflection, including play/pause in medium mode. Glyph-only assets prevent
+  baked-in fills and mismatched hover outlines from stacking.
+- Shell corners use an antialiased alpha mask through DWM, with a guarded
+  Win32 region, preserving the existing dimensions and native input controls.
+
+- Played music rails use the front waveform colour in compact, medium and
+  expanded views; the remaining rail uses a dim shade of the same cover tint.
+
+- Compact focus/music ownership follows the latest start/resume action; pausing
+  an activity falls back to another running activity instead of locking focus.
+  Brief metadata gaps and already-pending reminders do not steal that ownership.
+- Adapter connection is tracked independently from charging current, including
+  devices that hold a charge limit. Plug/unplug shows a short in-app notice and
+  updates lightning effects through an explicit AC power event subscription.
+
+- Compact artwork/icon follows the active context. The right lightning shows
+  Windows battery charge as green fill and adapter connection as glow/sparks.
+
+- Karaoke highlighting uses Lyricsfile word timestamps when available, with a
+  line-timed sweep fallback. Long compact/medium lyrics follow the sung glyph
+  inside their viewport; pause and seek use the media timeline directly.
+- Recheck artwork after media-property events, shortly after a track change,
+  and periodically to recover late thumbnails without discarding valid artwork.
+- Add opt-in diagnostics for the actual running instance, including thumbnail
+  acquisition errors and cover-render failures.
+
 - First hover opens the medium view directly from the hidden indicator, with
   geometry starting at the actual visible bounds; a click opens the large panel.
 - Cover retrieval uses a separate bounded worker, partial stream reads and
