@@ -58,6 +58,17 @@ than the ignored `artifacts` directory as a source dependency.
 
 ## Verification limits
 
+Read-only media diagnostics (no player controls or lyric network requests):
+
+```powershell
+./artifacts/release-0.3.0/Horizon.exe --offscreen --media-probe
+```
+
+Add `--lyrics-network` explicitly to diagnose live lyric timing as well. This
+sends the current track metadata to LRCLIB and may update the local lyric cache.
+Reports include cover attempts/errors and lyric readiness under ignored
+`artifacts`; review personal metadata before sharing them.
+
 `verify.ps1 -SkipPreviews` runs offscreen startup, layout/settings and motion
 probes using temporary data. The live lyric-network unit test is opt-in and
 ignored by default. Offscreen tests do not prove compositor smoothness, actual

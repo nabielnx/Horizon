@@ -3,17 +3,17 @@
 use crate::*;
 
 pub(super) fn media_diagnostics() -> Result<()> {
-    let media = media::Media::start(false);
+    let lyrics_network = std::env::args().any(|a| a == "--lyrics-network");
+    let media = media::Media::start(lyrics_network);
     let mut samples = Vec::new();
     for second in 1..=6 {
         std::thread::sleep(std::time::Duration::from_secs(1));
         if let Ok(track) = media.snapshot.lock() {
-            samples.push(serde_json::json!({"second":second,"source":track.source_app,"title":track.title,"artist":track.artist,"duration":track.duration,"playing":track.playing,"coverBytes":track.cover.as_ref().map_or(0, |b| b.len()),"coverRevision":track.cover_revision,"error":track.error}));
+            samples.push(serde_json::json!({"second":second,"source":track.source_app,"title":track.title,"artist":track.artist,"duration":track.duration,"playing":track.playing,"coverBytes":track.cover.as_ref().map_or(0, |b| b.len()),"coverRevision":track.cover_revision,"coverAttempts":track.cover_attempts,"coverError":track.cover_error,"lyricLines":track.lyrics.len(),"lyricsLoaded":track.lyrics_loaded,"lyricsRetryMs":track.lyrics_retry.map(|at| at.saturating_duration_since(Instant::now()).as_millis() as u64),"error":track.error}));
         }
     }
     std::fs::create_dir_all("artifacts").map_err(|e| Error::new(E_FAIL, e.to_string()))?;
-    let report =
-        serde_json::json!({"readOnly":true,"lyricsNetworkEnabled":false,"samples":samples});
+    let report = serde_json::json!({"readOnly":!lyrics_network,"mediaControlsUsed":false,"lyricsNetworkEnabled":lyrics_network,"lyricCacheMayBeUpdated":lyrics_network,"samples":samples});
     std::fs::write(
         "artifacts/media-diagnostics.json",
         serde_json::to_vec_pretty(&report).map_err(|e| Error::new(E_FAIL, e.to_string()))?,
@@ -42,6 +42,30 @@ pub(super) unsafe fn startup_checks(hwnd: HWND, w: &mut Window) -> Result<()> {
         if border_supported && border.0 != 0xfffffffe {
             return Err(Error::new(E_FAIL, "System border was not suppressed"));
         }
+        // Exercise the first hover from the actual hidden indicator, including
+        // the first content frame before any animation time has elapsed.
+        w.mode = shell_policy::Mode::Indicator;
+        w.idle_transition = None;
+        w.peek = 0.;
+        set_mode(w, shell_policy::Mode::Peek);
+        if w.idle_geometry()
+            != shell_policy::Mode::Indicator
+                .idle_geometry(w.shared.borrow().data.settings.width as f32)
+        {
+            return Err(Error::new(E_FAIL, "First hover jumped to compact bounds"));
+        }
+        w.paint()?;
+        if !w
+            .hits
+            .iter()
+            .any(|hit| matches!(hit.action, Action::Media(0)))
+        {
+            return Err(Error::new(
+                E_FAIL,
+                "First hover rendered compact content instead of peek",
+            ));
+        }
+        w.idle_transition = None;
         let mut frames = 0;
         for _ in 0..3 {
             for mode in [shell_policy::Mode::Peek, shell_policy::Mode::Compact] {
@@ -68,6 +92,7 @@ pub(super) unsafe fn startup_checks(hwnd: HWND, w: &mut Window) -> Result<()> {
             "completedFrameOnCreation": true,
             "systemBorderSuppressed": if border_supported { Some(true) } else { None },
             "hoverCycles": 3,
+            "indicatorOpensDirectlyToPeek": true,
             "hoverFramesRendered": frames,
             "hoverSnapshotsReadable": true
         });
