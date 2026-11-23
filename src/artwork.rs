@@ -1,5 +1,5 @@
 use windows::{
-    Win32::{Graphics::Imaging::*, System::Com::*},
+    Win32::{Graphics::Imaging::*, System::Com::*, UI::WindowsAndMessaging::HICON},
     core::*,
 };
 pub unsafe fn source(bytes: &[u8], size: u32) -> Result<IWICBitmapSource> {
@@ -62,11 +62,30 @@ pub unsafe fn preview(bytes: &[u8]) -> Result<PreviewImage> {
             WICDecodeMetadataCacheOnLoad,
         )?;
         let frame = decoder.GetFrame(0)?;
+        preview_pixels(&factory, &frame, 320)
+    }
+}
+
+pub unsafe fn icon_preview(icon: HICON) -> Result<PreviewImage> {
+    unsafe {
+        let factory: IWICImagingFactory =
+            CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
+        let bitmap = factory.CreateBitmapFromHICON(icon)?;
+        preview_pixels(&factory, &bitmap, 64)
+    }
+}
+
+unsafe fn preview_pixels(
+    factory: &IWICImagingFactory,
+    source: &IWICBitmapSource,
+    limit: u32,
+) -> Result<PreviewImage> {
+    unsafe {
         let (mut width, mut height) = (0, 0);
-        frame.GetSize(&mut width, &mut height)?;
-        let (width, height) = fit_size(width, height, 640, 320);
+        source.GetSize(&mut width, &mut height)?;
+        let (width, height) = fit_size(width, height, limit, limit);
         let scaler = factory.CreateBitmapScaler()?;
-        scaler.Initialize(&frame, width, height, WICBitmapInterpolationModeFant)?;
+        scaler.Initialize(source, width, height, WICBitmapInterpolationModeFant)?;
         let converter = factory.CreateFormatConverter()?;
         converter.Initialize(
             &scaler,
@@ -229,7 +248,7 @@ mod tests {
         unsafe {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
             let image = preview(include_bytes!("../assets/fixtures/cover.png")).unwrap();
-            assert!(image.width <= 640 && image.height <= 320);
+            assert!(image.width <= 320 && image.height <= 320);
             assert_eq!(
                 image.pixels.len(),
                 image.width as usize * image.height as usize * 4

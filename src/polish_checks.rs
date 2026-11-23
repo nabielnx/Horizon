@@ -95,6 +95,7 @@ pub(super) unsafe fn run(hwnd: HWND, w: &mut Window) -> Result<()> {
                 artist: "Aster · Midnight Sessions".into(),
                 position: 108.,
                 duration: 251.,
+                can_seek: true,
                 playing: true,
                 palette: artwork::palette(include_bytes!("../assets/fixtures/cover.png")),
                 cover: Some(std::sync::Arc::new(
@@ -118,7 +119,7 @@ pub(super) unsafe fn run(hwnd: HWND, w: &mut Window) -> Result<()> {
             w.mode = mode;
             paint(w, 540)?;
             let (left, right, height) = if mode == shell_policy::Mode::Compact {
-                (115, 425, 50)
+                (115, 425, layout::COMPACT_HEIGHT as i32)
             } else {
                 (0, 540, 101)
             };
@@ -136,7 +137,7 @@ pub(super) unsafe fn run(hwnd: HWND, w: &mut Window) -> Result<()> {
         let mut rendered = 0;
         for width in [360, 480, 540, 560, 591, 680] {
             w.shared.borrow_mut().data.settings.width = width;
-            for page in 0..6 {
+            for page in 0..=monitor::PAGE {
                 w.page = page;
                 w.priority_open = false;
                 w.shelf_detail = false;
@@ -180,26 +181,150 @@ pub(super) unsafe fn run(hwnd: HWND, w: &mut Window) -> Result<()> {
         }
         w.shared.borrow_mut().data.settings.width = 680;
         w.page = 0;
-        w.sidebar_scroll = sidebar_max_scroll(0, &w.shared.borrow().data.settings);
-        w.sidebar_target_scroll = w.sidebar_scroll;
+        paint(w, 680)?;
+        let sidebar: Vec<_> = w
+            .hits
+            .iter()
+            .filter(|hit| matches!(hit.action, Action::Page(_) | Action::Settings))
+            .collect();
+        if sidebar.len() != 7
+            || ![monitor::PAGE, 0, 1, 2, 3, 4]
+                .into_iter()
+                .enumerate()
+                .all(|(i, page)| sidebar[i].action == Action::Page(page))
+            || sidebar[6].action != Action::Settings
+            || sidebar
+                .iter()
+                .any(|hit| hit.w != 32 || hit.h != 32 || hit.y + hit.h > host_height())
+            || sidebar
+                .windows(2)
+                .any(|pair| pair[0].y + pair[0].h >= pair[1].y)
+        {
+            return Err(Error::new(
+                E_FAIL,
+                "Sidebar must start with Monitor above Music and keep Settings clear",
+            ));
+        }
+        capture(w, "artifacts/previews/layout-20261102-sidebar.bmp")?;
+        action(hwnd, w, Action::Page(monitor::PAGE));
         paint(w, 680)?;
         if !w
             .hits
             .iter()
-            .any(|hit| matches!(hit.action, Action::Page(5)))
+            .any(|hit| hit.action == Action::ToggleMonitorCompact)
+        {
+            return Err(Error::new(E_FAIL, "Monitor toggle must be reachable"));
+        }
+        action(hwnd, w, Action::ToggleMonitorCompact);
+        let persisted = {
+            let state = w.shared.borrow();
+            Data::load(&state.store).is_ok_and(|data| data.settings.monitor_in_compact)
+        };
+        if !persisted {
+            return Err(Error::new(E_FAIL, "Monitor toggle did not persist"));
+        }
+        w.expanded = false;
+        w.expansion = 0.;
+        w.mode = shell_policy::Mode::Compact;
+        w.idle_transition = None;
+        w.shared.borrow_mut().data.settings.width = 360;
+        let outline = shell_outline(w);
+        let badges = monitor::Badges::new(outline);
+        let previous_dpi = w.dpi;
+        for dpi in [96, 120, 144].map(dpi::Scale::new) {
+            w.dpi = dpi;
+            apply_frame(hwnd, w);
+            let mut client = RECT::default();
+            GetClientRect(hwnd, &mut client)?;
+            let badge_region = CreateRectRgn(0, 0, 0, 0);
+            let result = GetWindowRgn(hwnd, badge_region);
+            let physical = |dips| dpi.physical(dips).round() as i32;
+            let y = physical(outline.height / 2.);
+            let hit = |x| PtInRegion(badge_region, physical(x), y).as_bool();
+            let separate = hit(badges.cpu.0 + 14.)
+                && hit(badges.memory.0 + 54.)
+                && !hit(outline.offset + outline.width + 3.);
+            let _ = DeleteObject(badge_region.into());
+            if result.0 == ERROR
+                || !separate
+                || !w.show_monitor_badges()
+                || client.right != dpi.px(monitor::COMPACT_CLIENT_WIDTH)
+            {
+                return Err(Error::new(E_FAIL, "Scaled monitor badges must be separate"));
+            }
+            w.canvas = Some(Canvas::new(
+                hwnd,
+                client.right as u32,
+                client.bottom as u32,
+                w.alpha_shell,
+                dpi,
+            )?);
+            w.paint()?;
+        }
+        w.dpi = previous_dpi;
+        w.expanded = true;
+        w.expansion = 1.;
+        w.mode = shell_policy::Mode::Expanded;
+        action(hwnd, w, Action::ToggleMonitorCompact);
+        w.shared.borrow_mut().data.settings.width = 680;
+        w.sidebar_scroll = sidebar_max_scroll(figma_ui::SIDEBAR_ICONS.len());
+        w.sidebar_target_scroll = w.sidebar_scroll;
+        w.page = assistant::PAGE;
+        paint(w, 680)?;
+        let assistant_hit = w
+            .hits
+            .iter()
+            .find(|hit| hit.action == Action::Page(assistant::PAGE));
+        let settings_hit = w.hits.iter().find(|hit| hit.action == Action::Settings);
+        if !matches!((assistant_hit, settings_hit), (Some(page), Some(settings))
+            if page.h == SIDEBAR_SIZE as i32
+                && settings.y - (page.y + page.h) == SIDEBAR_SETTINGS_GAP as i32)
             || !w
                 .hits
                 .iter()
-                .any(|hit| matches!(hit.action, Action::Settings))
+                .any(|hit| hit.action == Action::SettingsAt(assistant::SETTINGS_PAGE))
         {
             return Err(Error::new(
                 E_FAIL,
-                "Scrolled sidebar loses Files or Settings",
+                "Scrolling did not reveal Assistant and keep Settings available",
             ));
         }
-        capture(w, "artifacts/previews/layout-20261102-sidebar-scrolled.bmp")?;
+        w.assistant
+            .attach([assistant::Attachment::File("Notes.txt".into())]);
+        w.assistant
+            .attach_clipboard_image(include_bytes!("../assets/fixtures/cover.png").to_vec());
+        for width in [360, 680] {
+            w.shared.borrow_mut().data.settings.width = width;
+            paint(w, width)?;
+            let mut items = w
+                .hits
+                .iter()
+                .filter(|hit| matches!(hit.action, Action::AiDetach(_)));
+            if !matches!((items.next(), items.next()), (Some(first), Some(second))
+                if first.action == Action::AiDetach(0) && second.action == Action::AiDetach(1)
+                    && first.y == second.y && first.x + first.w < second.x)
+                || items.next().is_some()
+            {
+                return Err(Error::new(
+                    E_FAIL,
+                    "Two Assistant attachments must appear side by side",
+                ));
+            }
+        }
+        action(hwnd, w, Action::AiDetach(0));
+        if !matches!(
+            w.assistant.attachments.as_slice(),
+            [assistant::Attachment::Image(_)]
+        ) {
+            return Err(Error::new(
+                E_FAIL,
+                "Removing one attachment affected its neighbor",
+            ));
+        }
+        w.assistant.clear_chat();
         w.sidebar_scroll = 0.;
         w.sidebar_target_scroll = 0.;
+        w.page = 0;
         let track_before = w
             .shared
             .borrow()
@@ -368,9 +493,9 @@ pub(super) unsafe fn run(hwnd: HWND, w: &mut Window) -> Result<()> {
             .iter()
             .filter(|h| matches!(h.action, Action::SetFocusMinutes(_)))
             .count()
-            != 6
+            != 0
         {
-            return Err(Error::new(E_FAIL, "Focus duration controls are missing"));
+            return Err(Error::new(E_FAIL, "Paused focus exposed duration controls"));
         }
         action(hwnd, w, Action::Focus);
         if w.shared.borrow().focus_left != 750 {
@@ -378,6 +503,37 @@ pub(super) unsafe fn run(hwnd: HWND, w: &mut Window) -> Result<()> {
         }
         paint(w, 540)?;
         action(hwnd, w, Action::Reset);
+        paint(w, 540)?;
+        if w.hits
+            .iter()
+            .filter(|h| matches!(h.action, Action::SetFocusMinutes(_)))
+            .count()
+            != 3
+            || w.hits
+                .iter()
+                .filter(|h| matches!(h.action, Action::SetBreakMinutes(_)))
+                .count()
+                != 3
+        {
+            return Err(Error::new(E_FAIL, "Focus and break presets are missing"));
+        }
+        action(hwnd, w, Action::FocusTaskMenu);
+        paint(w, 540)?;
+        if !w.hits.iter().any(|h| h.action == Action::FocusTask(None))
+            || !w
+                .hits
+                .iter()
+                .any(|h| h.action == Action::FocusTask(Some(0)))
+            || w.hits
+                .iter()
+                .any(|h| h.action == Action::FocusTask(Some(2)))
+        {
+            return Err(Error::new(
+                E_FAIL,
+                "Focus task picker did not filter completed tasks",
+            ));
+        }
+        action(hwnd, w, Action::FocusTask(None));
         w.shared.borrow_mut().focus_left = 0;
         paint(w, 540)?;
         action(hwnd, w, Action::Focus);
@@ -542,6 +698,48 @@ pub(super) unsafe fn run(hwnd: HWND, w: &mut Window) -> Result<()> {
         {
             return Err(Error::new(E_FAIL, "Narrow shelf actions are missing"));
         }
+        let toggle = Action::ToggleShelfPreview(0);
+        let path = w.shared.borrow().data.shelf_files[0].path.clone();
+        if !w.hits.iter().any(|hit| hit.action == toggle)
+            || w.shelf_preview_open
+            || w.preview_worker
+                .as_ref()
+                .and_then(|worker| worker.preview(&path))
+                .is_some()
+        {
+            return Err(Error::new(
+                E_FAIL,
+                "Shelf preview must be available on demand",
+            ));
+        }
+        action(hwnd, w, toggle);
+        let deadline = Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            paint(w, 360)?;
+            if matches!(
+                w.preview_worker
+                    .as_ref()
+                    .and_then(|worker| worker.preview(&path)),
+                Some(shelf::Preview::Image(_))
+            ) {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err(Error::new(
+                    E_FAIL,
+                    "Shelf preview did not load after opening",
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        action(hwnd, w, toggle);
+        paint(w, 360)?;
+        if w.shelf_preview_open || !w.hits.iter().any(|hit| hit.action == toggle) {
+            return Err(Error::new(
+                E_FAIL,
+                "Shelf preview cannot be closed and reopened",
+            ));
+        }
         capture(w, "artifacts/previews/polish-shelf-detail-360.bmp")?;
         {
             let mut s = w.shared.borrow_mut();
@@ -564,7 +762,7 @@ pub(super) unsafe fn run(hwnd: HWND, w: &mut Window) -> Result<()> {
         w.canvas = None;
         apply_frame(hwnd, w);
         let _ = UpdateWindow(hwnd);
-        let report = serde_json::json!({"offscreen":true,"desktopInputUsed":false,"widths":[360,480,540,560,591,680],"expandedPanelSize":[680,280],"figmaPeekSize":[591,101],"figmaCompactSize":[310,50],"commonExpandedHeight":280,"expandedBottomRadius":32,"pausedPeekDashboard":true,"current540CompactAndPeekInBounds":true,"shelfHeaderClearsClock":true,"pagesRendered":rendered,"controlsInBounds":true,"priorityMenuAndTaskCreation":true,"taskRowActionsDoNotOverlap":true,"taskComposerColumnsAligned":true,"tasksSurfaceOpaque":true,"otherPagesKeepConfiguredOpacity":true,"taskPriorityOpensUpward":true,"taskPriorityKeyboardNavigation":true,"focusStartPauseResumeResetRestart":true,"blankTaskRejected":true,"allSevenAgendaItemsAccessible":true,"narrowShelfActionsAccessible":true});
+        let report = serde_json::json!({"offscreen":true,"desktopInputUsed":false,"widths":[360,480,540,560,591,680],"expandedPanelSize":[680,280],"figmaPeekSize":[591,101],"figmaCompactSize":[310,42],"commonExpandedHeight":280,"expandedBottomRadius":32,"pausedPeekDashboard":true,"current540CompactAndPeekInBounds":true,"shelfHeaderClearsClock":true,"pagesRendered":rendered,"controlsInBounds":true,"priorityMenuAndTaskCreation":true,"taskRowActionsDoNotOverlap":true,"taskComposerColumnsAligned":true,"tasksSurfaceOpaque":true,"otherPagesKeepConfiguredOpacity":true,"taskPriorityOpensUpward":true,"taskPriorityKeyboardNavigation":true,"focusStartPauseResumeResetRestart":true,"blankTaskRejected":true,"allSevenAgendaItemsAccessible":true,"narrowShelfActionsAccessible":true});
         std::fs::write(
             "artifacts/polish-checks-0.3.json",
             serde_json::to_vec_pretty(&report).map_err(|e| Error::new(E_FAIL, e.to_string()))?,

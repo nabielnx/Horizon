@@ -239,7 +239,7 @@ impl Window {
             );
             let grid_w = 238.0;
             let narrow = width < 434.;
-            let month_name = MONTHS[self.calendar.month.month0() as usize];
+            let month_name = i18n::tr(MONTHS[self.calendar.month.month0() as usize]);
             let month_title = format!("{} {}", month_name, self.calendar.month.year());
             let month_size = if c.measure_text(&month_title, 15., true) > 114. {
                 12.5
@@ -249,7 +249,7 @@ impl Window {
             c.text(&month_title, x, 29., 114., month_size, true, INK);
             for (label, icon, xx, ww, a) in [
                 ("", "chevron-left", x + 116., 24., Action::Month(-1)),
-                ("Hari ini", "", x + 144., 66., Action::Today),
+                (i18n::tr("Hari ini"), "", x + 144., 66., Action::Today),
                 ("", "chevron-right", x + 214., 24., Action::Month(1)),
             ] {
                 let sy = 26. - self.calendar.scroll;
@@ -282,7 +282,15 @@ impl Window {
             let cell_w = grid_w / 7.;
             for (i, day) in DAYS_SHORT.iter().enumerate() {
                 let color = if i >= 5 { 0x8b97a5 } else { 0x55606d };
-                c.center(day, x + i as f32 * cell_w, 55., cell_w, 10., false, color);
+                c.center(
+                    i18n::tr(day),
+                    x + i as f32 * cell_w,
+                    55.,
+                    cell_w,
+                    10.,
+                    false,
+                    color,
+                );
             }
             for (i, date) in self.calendar.days().into_iter().enumerate() {
                 let col = i % 7;
@@ -386,7 +394,7 @@ impl Window {
                 c.rect(div_x, 26., 1., 176., 0., 0x1b1f26);
             } else {
                 c.control_glass(x, 205., width, 22., 6., Some(0x818cf8), false, false);
-                c.center("Agenda ↓", x, 209., width, 10., true, 0xa5b4fc);
+                c.center(i18n::tr("Agenda ↓"), x, 209., width, 10., true, 0xa5b4fc);
                 self.calendar_hit(x, 205., width, 22., Action::CalendarAgenda);
             }
 
@@ -406,8 +414,8 @@ impl Window {
             );
 
             let sel = self.calendar.selected;
-            let weekday_name = DAYS_SHORT[sel.weekday().num_days_from_monday() as usize];
-            let month_short = MONTHS_SHORT[sel.month0() as usize];
+            let weekday_name = i18n::tr(DAYS_SHORT[sel.weekday().num_days_from_monday() as usize]);
+            let month_short = i18n::tr(MONTHS_SHORT[sel.month0() as usize]);
             let date_label = format!("{}, {} {}", weekday_name, sel.day(), month_short);
             c.text(
                 &date_label,
@@ -439,7 +447,7 @@ impl Window {
                 self.calendar.form,
             );
             c.center(
-                "+ Acara",
+                i18n::tr("+ Acara"),
                 btn_x,
                 btn_y + 4.5,
                 btn_w,
@@ -482,7 +490,7 @@ impl Window {
                     0x526072,
                 );
                 c.center(
-                    "Belum ada acara",
+                    i18n::tr("Belum ada acara"),
                     right_x + 8.,
                     card_y + 92.,
                     right_w - 16.,
@@ -541,7 +549,7 @@ impl Window {
                     );
                     let lead_mins = event.lead_minutes.unwrap_or(s.event_lead_minutes);
                     c.text(
-                        &format!("{} mnt sebelumnya", lead_mins),
+                        &i18n::format!("{} mnt sebelumnya", "{} min before", lead_mins),
                         right_x + 48.,
                         ey + 18.,
                         title_w,
@@ -617,9 +625,9 @@ impl Window {
                 MUTED,
             );
             let form_header = if self.calendar.editing.is_some() {
-                "Edit acara"
+                i18n::tr("Edit acara")
             } else {
-                "Tambah acara"
+                i18n::tr("Tambah acara")
             };
             c.text(
                 form_header,
@@ -638,9 +646,9 @@ impl Window {
             y += 42.;
             self.calendar.form_y = y;
             if self.calendar.form {
-                c.text("Judul acara", x, y, width, 10.5, false, MUTED);
+                c.text(i18n::tr("Judul acara"), x, y, width, 10.5, false, MUTED);
                 c.text(
-                    "Pukul (HH:mm)",
+                    i18n::tr("Pukul (HH:mm)"),
                     x,
                     y + 76.,
                     width / 2. - 8.,
@@ -649,7 +657,7 @@ impl Window {
                     MUTED,
                 );
                 c.text(
-                    "Ingatkan (menit)",
+                    i18n::tr("Ingatkan (menit)"),
                     x + width / 2. + 8.,
                     y + 76.,
                     width / 2. - 8.,
@@ -658,7 +666,7 @@ impl Window {
                     MUTED,
                 );
                 c.text(
-                    "Link acara (opsional)",
+                    i18n::tr("Link acara (opsional)"),
                     x,
                     y + 152.,
                     width,
@@ -668,9 +676,9 @@ impl Window {
                 );
                 let is_editing = self.calendar.editing.is_some();
                 let submit_label = if is_editing {
-                    "Perbarui acara"
+                    i18n::tr("Perbarui acara")
                 } else {
-                    "Simpan acara"
+                    i18n::tr("Simpan acara")
                 };
                 let submit_w = if is_editing { 148. } else { 137. };
                 let btn_x = x + width - submit_w;
@@ -710,7 +718,7 @@ impl Window {
                         false,
                     );
                     c.center(
-                        "Batal",
+                        i18n::tr("Batal"),
                         cancel_x,
                         btn_y + 8.5,
                         cancel_w,
@@ -722,7 +730,7 @@ impl Window {
                 }
 
                 c.text(
-                    &self.calendar.status,
+                    &i18n::message(&self.calendar.status),
                     x,
                     y + 276.,
                     width,

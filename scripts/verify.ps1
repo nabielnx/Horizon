@@ -7,7 +7,9 @@ try {
     $exe=(Resolve-Path -LiteralPath $Executable).Path
     $startupRuns=@()
     for($run=1;$run -le 3;$run++){
-        $startup=Start-Process -FilePath $exe -ArgumentList '--offscreen','--startup-probe' -PassThru -WindowStyle Hidden
+        $startupArgs=@('--offscreen','--startup-probe')
+        if($run -eq 3){$startupArgs+='--startup-island'}
+        $startup=Start-Process -FilePath $exe -ArgumentList $startupArgs -PassThru -WindowStyle Hidden
         if(-not $startup.WaitForExit(20000)){$startup.Kill();throw 'Owned startup probe timed out.'}
         if($startup.ExitCode -ne 0){throw "Native startup failed: $($startup.ExitCode)"}
         $startupRuns += Get-Content -LiteralPath artifacts\startup-checks-0.3.json -Raw | ConvertFrom-Json
@@ -32,7 +34,7 @@ public static long PrivateResident(IntPtr process){const int size=1048576;var bu
     }
     if(-not $probe.WaitForExit(20000)){ $probe.Kill();throw 'Owned offscreen probe timed out.' }
     if($probe.ExitCode -ne 0){throw "Native verification failed: $($probe.ExitCode)"}
-    [ordered]@{version='0.3.0';exitCode=$probe.ExitCode;offscreen=$true;mediaEnabled=$false;settingsPagesRendered=7;forcedGcOrTrim=$false;samples=$samples}|ConvertTo-Json -Depth 6|Set-Content -LiteralPath artifacts\native-smoke-0.3.json -Encoding utf8
+    [ordered]@{version='0.3.0';exitCode=$probe.ExitCode;offscreen=$true;mediaEnabled=$false;settingsPagesRendered=9;forcedGcOrTrim=$false;samples=$samples}|ConvertTo-Json -Depth 6|Set-Content -LiteralPath artifacts\native-smoke-0.3.json -Encoding utf8
     $motion=Start-Process -FilePath $exe -ArgumentList '--offscreen','--motion-probe' -PassThru -WindowStyle Hidden
     if(-not $motion.WaitForExit(20000)){$motion.Kill();throw 'Owned motion probe timed out.'}
     if($motion.ExitCode -ne 0){throw "Native motion failed: $($motion.ExitCode)"}
@@ -44,5 +46,5 @@ public static long PrivateResident(IntPtr process){const int size=1048576;var bu
     Get-ChildItem artifacts\previews -Filter *.bmp | ForEach-Object {$b=[Drawing.Bitmap]::FromFile($_.FullName);try{$b.Save([IO.Path]::ChangeExtension($_.FullName,'.png'),[Drawing.Imaging.ImageFormat]::Png)}finally{$b.Dispose()}}
     & (Join-Path $PSScriptRoot 'check-palette.ps1')
     }
-    Write-Output 'Native Settings checks and renderer passed. Measurements: artifacts\native-smoke-0.3.json'
+    Write-Output 'Native Settings, mascot and renderer checks passed. Measurements: artifacts\native-smoke-0.3.json'
 } finally {Pop-Location}

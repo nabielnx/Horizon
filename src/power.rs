@@ -1,4 +1,5 @@
 //! Read-only Windows battery status. No device polling thread or power changes.
+use crate::i18n;
 use std::time::{Duration, Instant};
 use windows::Win32::{
     Foundation::{HANDLE, HWND},
@@ -39,8 +40,8 @@ impl Notice {
     }
     pub fn text(&self) -> String {
         let label = match self.change {
-            ConnectionChange::Connected => "Charger terhubung",
-            ConnectionChange::Disconnected => "Charger dilepas",
+            ConnectionChange::Connected => i18n::tr("Charger terhubung"),
+            ConnectionChange::Disconnected => i18n::tr("Charger dilepas"),
         };
         self.percent.map_or_else(
             || label.to_string(),

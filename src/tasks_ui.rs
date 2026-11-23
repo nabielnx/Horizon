@@ -17,9 +17,9 @@ impl Window {
                 0.,
                 0x0d0f12,
             );
-            c.text("Tugas", x, 32., 100., 16., true, 0xf1f5f2);
+            c.text(i18n::tr("Tugas"), x, 32., 100., 16., true, 0xf1f5f2);
             c.ellipse(
-                x + c.measure_text("Tugas", 16., true) + 7.,
+                x + c.measure_text(i18n::tr("Tugas"), 16., true) + 7.,
                 40.,
                 4.,
                 4.,
@@ -27,7 +27,15 @@ impl Window {
             );
             if total == 0 {
                 c.glass_panel((x, 64., lw, list.height as f32), 10., 0x202022, 0.);
-                c.center("Belum ada tugas", x, 133., lw, 11., false, 0xa8b0bd);
+                c.center(
+                    i18n::tr("Belum ada tugas"),
+                    x,
+                    133.,
+                    lw,
+                    11.,
+                    false,
+                    0xa8b0bd,
+                );
             }
             for (row, (index, task)) in state
                 .data
@@ -344,7 +352,15 @@ impl Window {
                 render::TASK_PROGRESS_FILL,
                 0.6,
             );
-            c.text("Progres", x + 12., 76., w - 24., 10.5, false, 0xe5f6e9);
+            c.text(
+                i18n::tr("Progres"),
+                x + 12.,
+                76.,
+                w - 24.,
+                10.5,
+                false,
+                0x25492c,
+            );
             let numerator = done.to_string();
             let denominator = format!("/{}", total);
             let measured = c.measure_text(&numerator, 40., true)
@@ -359,7 +375,7 @@ impl Window {
                 w - 24.,
                 size,
                 true,
-                0xf2faf5,
+                0x102b18,
             );
             let num_w = c.measure_text(&numerator, size, true);
             c.text(
@@ -369,7 +385,7 @@ impl Window {
                 w - 26. - num_w,
                 26. * scale,
                 false,
-                0xd3e9d8,
+                0x25492c,
             );
             let segments = total.clamp(1, 6);
             let segment_w = (w - 24. - (segments - 1) as f32 * 4.) / segments as f32;
@@ -381,18 +397,18 @@ impl Window {
             let portion = c.animate_value((x, 186., w, 4.), 4, portion, 0.3);
             for i in 0..segments {
                 let xx = x + 12. + i as f32 * (segment_w + 4.);
-                c.rect(xx, 186., segment_w, 4., 2., 0x35443d);
+                c.rect(xx, 186., segment_w, 4., 2., 0x5bb570);
                 let fill = (portion * segments as f32 - i as f32).clamp(0., 1.);
                 if fill > 0. {
-                    c.rect(xx, 186., segment_w * fill, 4., 2., render::TASK_ACCENT);
+                    c.rect(xx, 186., segment_w * fill, 4., 2., 0x135227);
                 }
             }
             let caption = if total == 0 {
-                "Belum ada".into()
+                i18n::tr("Belum ada").into()
             } else if done == total {
-                "Semua selesai".into()
+                i18n::tr("Semua selesai").into()
             } else {
-                format!("{} tersisa", total - done)
+                i18n::format!("{} tersisa", "{} remaining", total - done)
             };
             c.text(
                 &caption,
@@ -401,7 +417,7 @@ impl Window {
                 w - 24.,
                 if w < 100. { 9. } else { 10.5 },
                 false,
-                0xe5f6e9,
+                0x25492c,
             );
         }
     }
@@ -429,7 +445,7 @@ impl Window {
             }
             c.text(
                 if track.title.is_empty() {
-                    "Siap diputar"
+                    i18n::tr("Siap diputar")
                 } else {
                     &track.title
                 },
@@ -442,7 +458,7 @@ impl Window {
             );
             c.text(
                 if track.artist.is_empty() {
-                    "Media Windows"
+                    i18n::tr("Media Windows")
                 } else {
                     &track.artist
                 },
@@ -461,13 +477,7 @@ impl Window {
             let caption = lyric
                 .and_then(|i| track.lyrics.get(i))
                 .map(|l| l.text.as_str())
-                .unwrap_or(if !track.lyrics_loaded && track.lyrics_retry.is_some() {
-                    "Menunggu layanan lirik"
-                } else if track.lyrics_loaded {
-                    "Lirik tidak tersedia"
-                } else {
-                    ""
-                });
+                .unwrap_or_else(|| track.lyrics_message());
             c.text(caption, x, 88., cw, 15., true, INK);
             if let Some(next) = lyric.and_then(|i| track.lyrics.get(i + 1)) {
                 c.text(&next.text, x, 115., cw, 11., false, 0x87939f);
@@ -545,14 +555,14 @@ impl Window {
 
 fn task_priority(priority: u8) -> (&'static str, u32) {
     match priority {
-        1 => ("Penting", 0xff8198),
-        2 => ("Ringan", 0x74dfb1),
-        _ => ("Sedang", 0xf1bf61),
+        1 => (i18n::tr("Penting"), 0xff8198),
+        2 => (i18n::tr("Ringan"), 0x74dfb1),
+        _ => (i18n::tr("Sedang"), 0xf1bf61),
     }
 }
 
 pub(super) unsafe fn priority_label_size(c: &Canvas, width: i32) -> f32 {
-    let measured = ["Penting", "Sedang", "Ringan"]
+    let measured = [i18n::tr("Penting"), i18n::tr("Sedang"), i18n::tr("Ringan")]
         .iter()
         .map(|text| unsafe { c.measure_text(text, 9.5, false) })
         .fold(0_f32, f32::max);

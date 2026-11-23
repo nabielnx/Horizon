@@ -1,17 +1,30 @@
-//! Settings composition uses the same opaque materials and motion as the shell.
+//! Settings uses neutral charcoal surfaces with solid selection fills.
 use crate::*;
 
-const X: f32 = 212.;
-const W: f32 = 474.;
-const MUTED_TEXT: u32 = 0xa2aab7;
-const PAGES: [(&str, &str); 7] = [
+const X: f32 = 204.;
+const W: f32 = 482.;
+const BACKGROUND: u32 = 0x111111;
+const MUTED_TEXT: u32 = 0xaaaaaa;
+const SIDEBAR: u32 = 0x171717;
+const CARD: u32 = 0x1e1e1e;
+const CONTROL: u32 = 0x2b2b2b;
+const BORDER: u32 = 0x393939;
+const SELECTED: u32 = 0x414141;
+const PRIMARY: u32 = 0x656565;
+const NAV_Y: [f32; 9] = [108., 146., 205., 243., 281., 319., 378., 416., 454.];
+const PAGES: [(&str, &str); 9] = [
     ("Tampilan", "Bentuk dan karakter Horizon."),
     ("Perilaku", "Gerak, akses cepat, dan integrasi Windows."),
     ("Fokus", "Sesuaikan ritme sesi kerja Anda."),
     ("Minum air", "Target dan jadwal hidrasi harian."),
     ("Musik", "Warna sampul dan lirik yang mengikuti musik."),
     ("Notifikasi", "Suara dan waktu pengingat."),
+    (
+        "Opasitas",
+        "Atur tiap halaman dan ukuran idle secara terpisah.",
+    ),
     ("Tentang", "Horizon, versi, dan penyimpanan lokal."),
+    ("AI", "Pilih penyedia dan model untuk Asisten Horizon."),
 ];
 
 impl Window {
@@ -23,12 +36,39 @@ impl Window {
     }
     unsafe fn settings_card(&self, c: &Canvas, y: f32, height: f32) {
         unsafe {
-            c.glass_panel((X, y, W, height), 14., 0x1a1c21, 0.);
+            c.rect(X, y, W, height, 12., CARD);
+            c.outline(X, y, W, height, 12., BORDER);
         }
+    }
+    unsafe fn settings_divider(&self, c: &Canvas, y: f32) {
+        unsafe { c.rect(X + 16., y, W - 32., 1., 0., BORDER) }
     }
     unsafe fn settings_caption(&self, c: &Canvas, text: &str, y: f32) {
         unsafe {
             c.text(text, X + 2., y, W, 10., true, MUTED_TEXT);
+        }
+    }
+    unsafe fn settings_button(&self, c: &Canvas, b: (f32, f32, f32, f32), selected: bool) -> f32 {
+        unsafe {
+            let hovered = self.settings_hover(b);
+            let hover = c.hover_amount(b, hovered);
+            let press = c.animate_value(b, 1, f32::from(self.pressed && hovered), motion::PRESS);
+            let active = c.animate_value(b, 2, f32::from(selected), motion::STATE);
+            let dy = if self.shared.borrow().data.settings.motion {
+                press
+            } else {
+                0.
+            };
+            let fill = motion::mix(CONTROL, SELECTED, active);
+            c.rect(
+                b.0,
+                b.1 + dy,
+                b.2,
+                b.3,
+                8.,
+                motion::mix(fill, 0x606060, hover * 0.25),
+            );
+            dy
         }
     }
     unsafe fn settings_action(
@@ -37,10 +77,11 @@ impl Window {
         text: &str,
         b: (i32, i32, i32, i32),
         action: Action,
+        selected: bool,
     ) {
         unsafe {
             let bounds = (b.0 as f32, b.1 as f32, b.2 as f32, b.3 as f32);
-            let dy = c.glass_button(bounds, 10., self.settings_hover(bounds));
+            let dy = self.settings_button(c, bounds, selected);
             c.center(
                 text,
                 bounds.0,
@@ -53,7 +94,7 @@ impl Window {
             self.hit(b.0, b.1, b.2, b.3, action);
         }
     }
-    unsafe fn settings_value(
+    unsafe fn settings_value_row(
         &mut self,
         c: &Canvas,
         title: &str,
@@ -63,18 +104,55 @@ impl Window {
         y: i32,
     ) {
         unsafe {
-            self.settings_card(c, y as f32, 52.);
-            c.text(title, X + 16., y as f32 + 17., 220., 12., true, INK);
-            c.center(value, 438., y as f32 + 18., 152., 11., false, 0xdce2eb);
-            for (icon, x, delta) in [("minus", 598, -step), ("plus", 640, step)] {
-                let b = (x as f32, y as f32 + 9., 32., 34.);
-                let dy = c.glass_button(b, 9., self.settings_hover(b));
-                c.icon_centered(icon, (b.0, b.1 + dy, b.2, b.3), 15.);
-                self.hit(x, y + 9, 32, 34, Action::Setting(key, delta));
+            c.text(title, X + 16., y as f32 + 17., 244., 12., true, INK);
+            self.settings_stepper(
+                c,
+                (X + W - 178., y as f32 + 8., 162., 32.),
+                value,
+                key,
+                step,
+            );
+        }
+    }
+    unsafe fn settings_stepper(
+        &mut self,
+        c: &Canvas,
+        b: (f32, f32, f32, f32),
+        value: &str,
+        key: usize,
+        step: i32,
+    ) {
+        unsafe {
+            let (x, y, width, height) = b;
+            let button = 30.;
+            c.rect(x, y, width, height, 8., CONTROL);
+            c.center(
+                value,
+                x + button,
+                y + (height - 14.) / 2.,
+                width - button * 2.,
+                11.,
+                true,
+                INK,
+            );
+            for (icon, left, delta) in [("minus", x, -step), ("plus", x + width - button, step)] {
+                let hit = (left, y, button, height);
+                let dy = self.settings_button(c, hit, false);
+                c.icon_centered(icon, (left, y + dy, button, height), 14.);
+                self.hit(
+                    left as i32,
+                    y as i32,
+                    button as i32,
+                    height as i32,
+                    Action::Setting(key, delta),
+                );
+            }
+            for divider in [x + button, x + width - button] {
+                c.rect(divider, y + 6., 1., height - 12., 0., BORDER);
             }
         }
     }
-    unsafe fn settings_switch(
+    unsafe fn settings_switch_row(
         &mut self,
         c: &Canvas,
         title: &str,
@@ -84,30 +162,39 @@ impl Window {
         y: i32,
     ) {
         unsafe {
-            let b = (X, y as f32, W, 66.);
+            let b = (X + 4., y as f32 + 3., W - 8., 54.);
             let hover = c.hover_amount(b, self.settings_hover(b));
-            c.glass_panel(b, 14., motion::mix(0x1a1c21, 0x25282e, hover), hover);
-            c.text(title, X + 16., y as f32 + 13., 354., 12., true, INK);
+            c.rect(
+                b.0,
+                b.1,
+                b.2,
+                b.3,
+                8.,
+                motion::mix(CARD, CONTROL, hover * 0.55),
+            );
+            c.text(title, X + 16., y as f32 + 11., 354., 12., true, INK);
             c.text(
                 detail,
                 X + 16.,
-                y as f32 + 35.,
+                y as f32 + 32.,
                 354.,
                 10.,
                 false,
                 MUTED_TEXT,
             );
             let t = c.animate_value(
-                (620., y as f32 + 20., 46., 26.),
+                (620., y as f32 + 17., 46., 26.),
                 2,
                 f32::from(on),
                 motion::STATE,
             );
-            c.glass_panel(
-                (620., y as f32 + 20., 46., 26.),
+            c.rect(
+                620.,
+                y as f32 + 17.,
+                46.,
+                26.,
                 13.,
-                motion::mix(0x363b44, 0x3c9b67, t),
-                hover,
+                motion::mix(0x383838, PRIMARY, t),
             );
             let press = c.animate_value(
                 b,
@@ -117,28 +204,40 @@ impl Window {
             );
             c.rect(
                 623. + 20. * t,
-                y as f32 + 23.,
+                y as f32 + 20.,
                 20. + press,
                 20.,
                 10.,
-                0xf5f8fb,
+                0xf5f5f5,
             );
-            self.hit(X as i32, y, W as i32, 66, Action::Setting(key, 1));
+            self.hit(
+                b.0 as i32,
+                b.1 as i32,
+                b.2 as i32,
+                b.3 as i32,
+                Action::Setting(key, 1),
+            );
         }
     }
     pub(super) unsafe fn draw_settings(&mut self, c: &Canvas, state: &Shared) {
         unsafe {
             let s = &state.data.settings;
-            c.rect(0., 0., 710., 550., 0., 0x101216);
-            c.rect(0., 0., 190., 550., 0., 0x17191e);
-            c.rect(189., 0., 1., 550., 0., 0x343840);
-            c.glass_panel((18., 22., 34., 34.), 11., 0x30343c, 0.);
-            c.icon_centered("sparkles", (18., 22., 34., 34.), 21.);
-            c.text("Horizon", 62., 23., 112., 18., true, INK);
-            c.text("PENGATURAN", 62., 47., 114., 8., true, MUTED_TEXT);
-            for (i, (name, _)) in PAGES.iter().enumerate() {
-                let y = 100. + i as f32 * 49.;
-                let b = (12., y, 166., 42.);
+            c.rect(0., 0., 710., 550., 0., BACKGROUND);
+            c.rect(0., 0., 176., 550., 0., SIDEBAR);
+            c.rect(175., 0., 1., 550., 0., BORDER);
+            let _ = c.design_asset(
+                "horizon-brand",
+                include_bytes!("../assets/branding/app-icon.png"),
+                (18., 17., 34., 34.),
+            );
+            c.text("Horizon", 65., 22., 96., 17., true, INK);
+            c.text(i18n::tr("PENGATURAN"), 66., 45., 96., 8., true, MUTED_TEXT);
+            for (title, y) in [("UMUM", 87.), ("AKTIVITAS", 184.), ("APLIKASI", 357.)] {
+                c.text(i18n::tr(title), 20., y, 130., 9., true, MUTED_TEXT);
+            }
+            for (i, &(name, _)) in PAGES.iter().enumerate() {
+                let y = NAV_Y[i];
+                let b = (12., y, 152., 34.);
                 let hover = c.hover_amount(b, self.settings_hover(b));
                 let active = c.animate_value(b, 2, f32::from(self.page == i), motion::STATE);
                 let press = c.animate_value(
@@ -148,23 +247,26 @@ impl Window {
                     motion::PRESS,
                 );
                 let dy = if s.motion { -hover * 0.5 + press } else { 0. };
-                c.glass_panel(
-                    (b.0, y + dy, b.2, b.3),
-                    12.,
-                    motion::mix(0x17191e, 0x353a43, active.max(hover * 0.55)),
-                    active.max(hover),
+                let row = motion::mix(SIDEBAR, CONTROL, hover);
+                c.rect(
+                    b.0,
+                    y + dy,
+                    b.2,
+                    b.3,
+                    9.,
+                    motion::mix(row, SELECTED, active),
                 );
-                settings_icons::draw(c, i, 23., y + 9. + dy, 24.);
+                settings_icons::draw(c, i, 22., y + 7. + dy, 20.);
                 c.text(
-                    name,
-                    60.,
-                    y + 13. + dy,
-                    112.,
+                    i18n::tr(name),
+                    51.,
+                    y + 9. + dy,
+                    105.,
                     11.5,
                     self.page == i,
-                    motion::mix(0xa4adba, 0xffffff, active.max(hover)),
+                    motion::mix(MUTED_TEXT, 0xffffff, active.max(hover)),
                 );
-                self.hit(12, y as i32, 166, 42, Action::Page(i));
+                self.hit(12, y as i32, 152, 34, Action::Page(i));
             }
             c.text(
                 &format!("v{}", env!("CARGO_PKG_VERSION")),
@@ -175,42 +277,75 @@ impl Window {
                 false,
                 MUTED_TEXT,
             );
-            let page = self.page.min(6);
-            c.text(PAGES[page].0, X, 27., W, 25., true, INK);
-            c.text(PAGES[page].1, X, 65., W, 11., false, MUTED_TEXT);
+            let page = self.page.min(PAGES.len() - 1);
+            c.text(i18n::tr(PAGES[page].0), X, 24., W, 27., true, INK);
+            c.text(i18n::tr(PAGES[page].1), X, 62., W, 11., false, MUTED_TEXT);
+            c.rect(X, 86., W, 1., 0., BORDER);
             match page {
                 0 => {
-                    self.settings_card(c, 100., 100.);
-                    c.text("PRATINJAU", X + 16., 114., 130., 8., true, MUTED_TEXT);
-                    let nw = 180. + (s.width - 360) as f32 * 0.12;
+                    self.settings_card(c, 100., 151.);
+                    c.rect(X + 16., 112., W - 32., 87., 8., BACKGROUND);
+                    let nw = 180. + (s.width - 360) as f32 * 0.12
+                        - if s.dynamic_island { 28. } else { 0. };
                     let nx = X + (W - nw) / 2.;
-                    c.glass_panel(
-                        (nx, 137., nw, 43.),
-                        (expanded_radius(s) * 0.55).min(21.),
-                        render::palette(s.theme)[1],
-                        0.3,
-                    );
-                    c.icon_centered("music-notes", (nx + 12., 145., 27., 27.), 18.);
-                    c.text("Horizon", nx + 49., 145., 118., 11., true, INK);
-                    c.rect(nx + 49., 165., nw - 101., 3., 1.5, 0x9ea8b5);
-                    self.settings_value(c, "Lebar panel", &format!("{} px", s.width), 0, 20, 212);
-                    self.settings_value(
+                    let py = if s.dynamic_island { 118. } else { 112. };
+                    let floating = f32::from(s.dynamic_island);
+                    let shape: Vec<_> =
+                        layout::contour_styled(nw, 42., 1. - 9. / 14., 37., floating)
+                            .into_iter()
+                            .map(|(x, y)| (nx + x, py + y))
+                            .collect();
+                    c.polygon(&shape, render::palette(s.theme)[1]);
+                    c.presence_eyes((nx + 12., py, 43., 42.), mascot::EyePose::default());
+                    c.design_glass_clock_sized("12:42", (nx + 56., py + 3., nw - 112., 36.), 20.);
+                    c.rect(nx + nw - 45., py + 19., 20., 3., 1.5, 0x9a9a9a);
+                    for (i, name) in ["Notch", "Dynamic Island"].into_iter().enumerate() {
+                        let active = s.dynamic_island == (i == 1);
+                        let b = (X + 16. + i as f32 * 230., 209., 220., 31.);
+                        let dy = self.settings_button(c, b, active);
+                        c.center(name, b.0, b.1 + 8. + dy, b.2, 11., active, INK);
+                        self.hit(
+                            b.0 as i32,
+                            b.1 as i32,
+                            b.2 as i32,
+                            b.3 as i32,
+                            Action::Setting(19, if i == 1 { 1 } else { -1 }),
+                        );
+                    }
+                    self.settings_caption(c, i18n::tr("UKURAN PANEL"), 259.);
+                    self.settings_card(c, 276., 141.);
+                    for y in [323., 370.] {
+                        c.rect(X + 16., y, W - 32., 1., 0., BORDER);
+                    }
+                    self.settings_value_row(
                         c,
-                        "Opasitas Air & Berkas",
-                        &format!("{}%", (s.opacity as f32 / 255. * 100.).round()),
-                        1,
-                        13,
-                        272,
+                        i18n::tr("Lebar panel"),
+                        &format!("{} px", s.width),
+                        0,
+                        20,
+                        276,
                     );
-                    self.settings_value(
+                    self.settings_value_row(
                         c,
-                        "Lengkung panel",
+                        i18n::tr("Lengkung panel"),
                         &format!("{} px", expanded_radius(s) as i32),
                         2,
                         2,
-                        332,
+                        323,
                     );
-                    self.settings_caption(c, "PALET DASAR", 402.);
+                    self.settings_value_row(
+                        c,
+                        i18n::tr("Opasitas semua"),
+                        &if (0..OPACITY_SURFACES).all(|i| s.opacity_for(i) == s.opacity) {
+                            format!("{}%", (s.opacity as f32 / 255. * 100.).round())
+                        } else {
+                            i18n::tr("Beragam").to_string()
+                        },
+                        1,
+                        13,
+                        370,
+                    );
+                    self.settings_caption(c, i18n::tr("PALET DASAR"), 432.);
                     for (i, (name, swatch)) in [
                         ("Titanium", 0x9ea8b5),
                         ("Forest", 0x88a894),
@@ -219,69 +354,84 @@ impl Window {
                     .into_iter()
                     .enumerate()
                     {
-                        let b = (X + i as f32 * 162., 424., 150., 49.);
-                        let t = c.animate_value(b, 2, f32::from(s.theme == i), motion::STATE);
-                        let h = c.hover_amount(b, self.settings_hover(b));
-                        c.glass_panel(
-                            b,
-                            12.,
-                            motion::mix(0x1d2026, 0x353b45, t.max(h * 0.5)),
-                            t.max(h),
-                        );
-                        c.ellipse(b.0 + 14., 440., 15., 15., swatch);
-                        c.text(name, b.0 + 39., 441., 88., 11., s.theme == i, INK);
+                        let b = (X + i as f32 * 162., 454., 150., 39.);
+                        let dy = self.settings_button(c, b, s.theme == i);
+                        c.ellipse(b.0 + 14., 466. + dy, 15., 15., swatch);
+                        c.text(name, b.0 + 39., 467. + dy, 88., 11., s.theme == i, INK);
                         self.hit(
                             b.0 as i32,
-                            424,
+                            454,
                             150,
-                            49,
+                            39,
                             Action::Setting(3, i as i32 - s.theme as i32),
                         );
                     }
                 }
                 1 => {
-                    self.settings_switch(
+                    self.settings_card(c, 110., 180.);
+                    self.settings_switch_row(
                         c,
-                        "Animasi & interaksi",
-                        "Spring, transisi halaman, dan refleksi saat hover.",
+                        i18n::tr("Animasi & interaksi"),
+                        i18n::tr("Spring, transisi halaman, dan refleksi saat hover."),
                         4,
                         s.motion,
-                        108,
+                        110,
                     );
-                    self.settings_switch(
+                    self.settings_divider(c, 170.);
+                    self.settings_switch_row(
                         c,
-                        "Mulai bersama Windows",
-                        "Horizon tersedia otomatis setelah Anda masuk.",
+                        i18n::tr("Mulai bersama Windows"),
+                        i18n::tr("Horizon tersedia otomatis setelah Anda masuk."),
                         5,
                         s.startup,
-                        184,
+                        170,
                     );
-                    self.settings_switch(
+                    self.settings_divider(c, 230.);
+                    self.settings_switch_row(
                         c,
-                        "Tampil di atas taskbar",
-                        "Semua ukuran menimpa taskbar di tepi atas layar.",
+                        i18n::tr("Tampil di atas taskbar"),
+                        i18n::tr("Semua ukuran menimpa taskbar di tepi atas layar."),
                         17,
                         s.taskbar_layout,
-                        260,
+                        230,
                     );
-                    self.settings_card(c, 348., 128.);
-                    self.settings_caption(c, "AKSES CEPAT", 362.);
-                    c.text("Ctrl + Alt + H", X + 18., 391., 154., 12., true, INK);
+                    self.settings_caption(c, i18n::tr("Bahasa / Language"), 313.);
+                    self.settings_card(c, 334., 52.);
+                    for (i, name) in ["Bahasa Indonesia", "English"].into_iter().enumerate() {
+                        let selected = (s.language == i18n::Language::English) == (i == 1);
+                        let b = (216 + i as i32 * 232, 344, 226, 32);
+                        self.settings_action(
+                            c,
+                            name,
+                            b,
+                            Action::Setting(20, if i == 1 { 1 } else { -1 }),
+                            selected,
+                        );
+                    }
+                    self.settings_caption(c, i18n::tr("AKSES CEPAT"), 412.);
+                    c.text("Ctrl + Alt + H", X + 18., 439., 154., 11., true, INK);
                     c.text(
-                        "Buka / ringkas panel",
+                        i18n::tr("Buka / ringkas panel"),
                         X + 200.,
-                        392.,
+                        439.,
                         247.,
                         11.,
                         false,
                         MUTED_TEXT,
                     );
-                    c.rect(X + 18., 421., W - 36., 1., 0., 0x343840);
-                    c.text("Klik kanan panel", X + 18., 441., 166., 12., true, INK);
                     c.text(
-                        "Buka pengaturan",
+                        i18n::tr("Klik kanan panel"),
+                        X + 18.,
+                        467.,
+                        166.,
+                        11.,
+                        true,
+                        INK,
+                    );
+                    c.text(
+                        i18n::tr("Buka pengaturan"),
                         X + 200.,
-                        442.,
+                        467.,
                         247.,
                         11.,
                         false,
@@ -289,40 +439,60 @@ impl Window {
                     );
                 }
                 2 => {
-                    self.settings_value(
-                        c,
-                        "Durasi sesi",
-                        &format!("{} menit", s.focus_minutes),
-                        6,
-                        5,
-                        108,
+                    self.settings_card(c, 110., 113.);
+                    c.icon("timer", X + 20., 127., 17., INK);
+                    c.text(
+                        i18n::tr("Sesi saat ini"),
+                        X + 46.,
+                        129.,
+                        340.,
+                        11.,
+                        true,
+                        MUTED_TEXT,
                     );
-                    self.settings_caption(c, "DURASI CEPAT", 187.);
-                    for (i, minutes) in [5, 15, 25, 50].into_iter().enumerate() {
-                        self.settings_action(
-                            c,
-                            &format!("{minutes} menit"),
-                            (212 + i as i32 * 122, 211, 108, 40),
-                            Action::Setting(6, minutes - s.focus_minutes as i32),
-                        );
-                    }
-                    self.settings_card(c, 278., 134.);
-                    c.icon("timer", X + 18., 299., 20., 0xffffff);
-                    c.text("Sesi saat ini", X + 49., 301., 340., 11., false, MUTED_TEXT);
                     let left = remaining(state);
                     c.text(
                         &format!("{:02}:{:02}", left / 60, left % 60),
-                        X + 18.,
-                        335.,
+                        X + 20.,
+                        154.,
                         240.,
-                        34.,
+                        38.,
                         true,
                         INK,
                     );
+                    self.settings_caption(c, i18n::tr("Durasi sesi"), 247.);
+                    self.settings_card(c, 267., 125.);
+                    self.settings_value_row(
+                        c,
+                        i18n::tr("Durasi sesi"),
+                        &i18n::format!("{} menit", "{} min", s.focus_minutes),
+                        6,
+                        5,
+                        267,
+                    );
+                    self.settings_divider(c, 315.);
                     c.text(
-                        "Waktu sesi berjalan tetap dipertahankan.",
+                        i18n::tr("DURASI CEPAT"),
+                        X + 16.,
+                        328.,
+                        W - 32.,
+                        9.,
+                        true,
+                        MUTED_TEXT,
+                    );
+                    for (i, minutes) in [5, 15, 25, 50].into_iter().enumerate() {
+                        self.settings_action(
+                            c,
+                            &i18n::format!("{minutes} menit", "{minutes} min"),
+                            (220 + i as i32 * 115, 347, 105, 32),
+                            Action::Setting(6, minutes - s.focus_minutes as i32),
+                            s.focus_minutes as i32 == minutes,
+                        );
+                    }
+                    c.text(
+                        i18n::tr("Waktu sesi berjalan tetap dipertahankan."),
                         X + 2.,
-                        433.,
+                        412.,
                         W,
                         10.5,
                         false,
@@ -330,96 +500,105 @@ impl Window {
                     );
                 }
                 3 => {
-                    self.settings_value(
+                    self.settings_caption(c, i18n::tr("HIDRASI"), 104.);
+                    self.settings_card(c, 124., 96.);
+                    self.settings_value_row(
                         c,
-                        "Target harian",
+                        i18n::tr("Target harian"),
                         &format!("{} ml", s.water_goal),
                         7,
                         250,
-                        104,
+                        124,
                     );
-                    self.settings_value(c, "Ukuran gelas", &format!("{} ml", s.cup), 8, 50, 164);
-                    self.settings_value(
+                    self.settings_divider(c, 172.);
+                    self.settings_value_row(
                         c,
-                        "Interval minum",
-                        &format!("{} menit", s.water_interval),
+                        i18n::tr("Ukuran gelas"),
+                        &format!("{} ml", s.cup),
+                        8,
+                        50,
+                        172,
+                    );
+                    self.settings_caption(c, i18n::tr("Pengingat minum"), 243.);
+                    self.settings_card(c, 264., 204.);
+                    self.settings_switch_row(
+                        c,
+                        i18n::tr("Pengingat minum"),
+                        i18n::tr("Jadwal melewati tengah malam tetap didukung."),
+                        11,
+                        s.water_enabled,
+                        264,
+                    );
+                    for y in [324., 372., 420.] {
+                        self.settings_divider(c, y);
+                    }
+                    self.settings_value_row(
+                        c,
+                        i18n::tr("Interval minum"),
+                        &i18n::format!("{} menit", "{} min", s.water_interval),
                         9,
                         1,
-                        224,
+                        324,
                     );
-                    self.settings_value(
+                    self.settings_value_row(
                         c,
-                        "Jam mulai",
+                        i18n::tr("Jam mulai"),
                         &format!("{:02}:00", s.water_start_hour),
                         12,
                         1,
-                        284,
+                        372,
                     );
-                    self.settings_value(
+                    self.settings_value_row(
                         c,
-                        "Jam selesai",
+                        i18n::tr("Jam selesai"),
                         &format!("{:02}:00", s.water_end_hour),
                         13,
                         1,
-                        344,
-                    );
-                    self.settings_switch(
-                        c,
-                        "Pengingat minum",
-                        "Jadwal melewati tengah malam tetap didukung.",
-                        11,
-                        s.water_enabled,
-                        411,
+                        420,
                     );
                 }
                 4 => {
-                    self.settings_switch(
+                    self.settings_card(c, 110., 180.);
+                    self.settings_switch_row(
                         c,
-                        "Warna dari sampul",
-                        "Palet dan glow mengikuti warna cover lagu.",
+                        i18n::tr("Warna dari sampul"),
+                        i18n::tr("Palet dan glow mengikuti warna cover lagu."),
                         15,
                         s.album_colors,
-                        108,
+                        110,
                     );
-                    self.settings_switch(
+                    self.settings_divider(c, 170.);
+                    self.settings_switch_row(
                         c,
-                        "Lirik sinkron",
-                        "Karaoke serta lirik berjalan di panel kecil/sedang.",
+                        i18n::tr("Lirik sinkron"),
+                        i18n::tr("Karaoke serta lirik berjalan di panel kecil/sedang."),
                         16,
                         s.show_lyrics,
-                        184,
+                        170,
                     );
-                    self.settings_switch(
+                    self.settings_divider(c, 230.);
+                    self.settings_switch_row(
                         c,
-                        "Cover cadangan (Apple)",
-                        "Judul dan artis dikirim saat cover Windows kosong.",
+                        i18n::tr("Cover cadangan (Apple)"),
+                        i18n::tr("Judul dan artis dikirim saat cover Windows kosong."),
                         18,
                         s.cover_fallback,
-                        260,
+                        230,
                     );
-                    self.settings_card(c, 348., 128.);
+                    self.settings_caption(c, i18n::tr("Musik & sumber konten"), 315.);
                     c.text(
-                        "Musik & sumber konten",
-                        X + 18.,
-                        368.,
-                        W - 36.,
-                        12.,
-                        true,
-                        INK,
-                    );
-                    c.text(
-                        "Kontrol media mengikuti sesi Windows.",
-                        X + 18.,
-                        401.,
+                        i18n::tr("Kontrol media mengikuti sesi Windows."),
+                        X + 2.,
+                        340.,
                         W - 36.,
                         11.,
                         false,
                         MUTED_TEXT,
                     );
                     c.text(
-                        "Lirik: LRCLIB. Cover cadangan: Apple Music.",
-                        X + 18.,
-                        432.,
+                        i18n::tr("Lirik: LRCLIB. Cover cadangan: Apple Music."),
+                        X + 2.,
+                        366.,
                         W - 36.,
                         11.,
                         false,
@@ -427,25 +606,27 @@ impl Window {
                     );
                 }
                 5 => {
-                    self.settings_switch(
+                    self.settings_card(c, 110., 108.);
+                    self.settings_switch_row(
                         c,
-                        "Suara pengingat",
-                        "Untuk fokus, tugas, kalender, dan minum air.",
+                        i18n::tr("Suara pengingat"),
+                        i18n::tr("Untuk fokus, tugas, kalender, dan minum air."),
                         10,
                         s.sound,
-                        108,
+                        110,
                     );
-                    self.settings_value(
+                    self.settings_divider(c, 170.);
+                    self.settings_value_row(
                         c,
-                        "Sebelum acara",
-                        &format!("{} menit", s.event_lead_minutes),
+                        i18n::tr("Sebelum acara"),
+                        &i18n::format!("{} menit", "{} min", s.event_lead_minutes),
                         14,
                         1,
-                        190,
+                        170,
                     );
                     self.settings_card(c, 278., 150.);
                     c.text(
-                        "Dengarkan nada pengingat",
+                        i18n::tr("Dengarkan nada pengingat"),
                         X + 18.,
                         299.,
                         W - 36.,
@@ -454,7 +635,7 @@ impl Window {
                         INK,
                     );
                     c.text(
-                        "Mengikuti volume dan perangkat audio Windows.",
+                        i18n::tr("Mengikuti volume dan perangkat audio Windows."),
                         X + 18.,
                         329.,
                         W - 36.,
@@ -465,13 +646,14 @@ impl Window {
                     if s.sound {
                         self.settings_action(
                             c,
-                            "Putar nada uji",
+                            i18n::tr("Putar nada uji"),
                             (230, 365, 154, 40),
                             Action::TestSound,
+                            false,
                         );
                     } else {
                         c.text(
-                            "Aktifkan suara untuk mencoba nada.",
+                            i18n::tr("Aktifkan suara untuk mencoba nada."),
                             X + 18.,
                             375.,
                             W - 36.,
@@ -481,66 +663,95 @@ impl Window {
                         );
                     }
                 }
+                6 => {
+                    let right = X + 247.;
+                    let row_height = 45.;
+                    for (x, name, rows) in [(X, "HALAMAN", 8.), (right, "MODE PANEL", 3.)] {
+                        c.text(i18n::tr(name), x + 2., 105., 230., 10., true, MUTED_TEXT);
+                        c.rect(x, 125., 235., rows * row_height, 12., CARD);
+                        c.outline(x, 125., 235., rows * row_height, 12., BORDER);
+                    }
+                    for (i, row, x, name) in [
+                        (MONITOR_OPACITY, 0, X, "Monitor"),
+                        (0, 1, X, "Musik"),
+                        (1, 2, X, "Fokus"),
+                        (2, 3, X, "Kalender"),
+                        (3, 4, X, "Air"),
+                        (4, 5, X, "Tugas"),
+                        (5, 6, X, "Berkas"),
+                        (ASSISTANT_OPACITY, 7, X, "Asisten"),
+                        (6, 0, right, "Idle kecil"),
+                        (7, 1, right, "Idle sedang"),
+                        (8, 2, right, "Pengaturan"),
+                    ] {
+                        let y = 125. + row as f32 * row_height;
+                        if row > 0 {
+                            c.rect(x + 12., y, 211., 1., 0., BORDER);
+                        }
+                        c.text(i18n::tr(name), x + 12., y + 15., 102., 11., true, INK);
+                        self.settings_stepper(
+                            c,
+                            (x + 116., y + 7., 107., 30.),
+                            &format!("{}%", (f32::from(s.opacity_for(i)) / 255. * 100.).round()),
+                            OPACITY_SETTING_START + i,
+                            13,
+                        );
+                    }
+                }
+                assistant::SETTINGS_PAGE => self.draw_assistant_settings(c, s),
                 _ => {
-                    self.settings_card(c, 108., 300.);
-                    c.glass_panel((234., 130., 48., 48.), 15., 0x333943, 0.3);
-                    c.icon_centered("sparkles", (234., 130., 48., 48.), 28.);
-                    c.text("Horizon", 300., 131., 300., 24., true, INK);
+                    self.settings_card(c, 110., 100.);
+                    c.rect(X + 16., 133., 76., 44., 15., BACKGROUND);
+                    self.draw_companion(c, (X + 16., 133., 76., 44.), false);
+                    c.text("Horizon", X + 110., 128., 300., 23., true, INK);
                     c.text(
-                        &format!("Versi {}", env!("CARGO_PKG_VERSION")),
-                        300.,
-                        168.,
+                        &i18n::format!("Versi {}", "Version {}", env!("CARGO_PKG_VERSION")),
+                        X + 111.,
+                        161.,
                         300.,
                         11.,
                         false,
                         MUTED_TEXT,
                     );
-                    c.text(
-                        "Ruang ringkas untuk ritme hari Anda.",
-                        234.,
-                        215.,
-                        422.,
-                        13.,
-                        true,
-                        INK,
+                    self.settings_caption(
+                        c,
+                        i18n::tr("Ruang ringkas untuk ritme hari Anda."),
+                        235.,
                     );
-                    c.rect(234., 253., 430., 1., 0., 0x343840);
+                    self.settings_card(c, 256., 126.);
                     for (i, text) in [
-                        "Pengaturan, tugas, dan jadwal tersimpan lokal.",
-                        "Kontrol media terhubung ke sesi Windows.",
-                        "Lirik dimuat melalui layanan LRCLIB.",
+                        i18n::tr("Pengaturan, tugas, dan jadwal tersimpan lokal."),
+                        i18n::tr("Kontrol media terhubung ke sesi Windows."),
+                        i18n::tr("Lirik dimuat melalui layanan LRCLIB."),
                     ]
                     .into_iter()
                     .enumerate()
                     {
-                        c.icon("check", 234., 278. + i as f32 * 34., 15., 0xffffff);
-                        c.text(
-                            text,
-                            262.,
-                            278. + i as f32 * 34.,
-                            398.,
-                            11.,
-                            false,
-                            MUTED_TEXT,
-                        );
+                        let y = 256. + i as f32 * 42.;
+                        if i > 0 {
+                            self.settings_divider(c, y);
+                        }
+                        c.icon("check", X + 16., y + 14., 14., INK);
+                        c.text(text, X + 43., y + 14., 398., 11., false, MUTED_TEXT);
                     }
                     self.settings_action(
                         c,
-                        "Keluar dari Horizon",
-                        (212, 432, 180, 40),
+                        i18n::tr("Keluar dari Horizon"),
+                        (204, 413, 180, 38),
                         Action::Exit,
+                        false,
                     );
                 }
             }
-            c.rect(X, 495., W, 1., 0., 0x30353e);
+            c.rect(X, 495., W, 1., 0., BORDER);
             let failed = state.status.contains("belum") || state.status.contains("gagal");
             let footer = if failed {
                 state.status.as_str()
             } else {
-                "Perubahan tersimpan otomatis di perangkat ini."
+                i18n::tr("Perubahan tersimpan otomatis di perangkat ini.")
             };
             c.text(
-                footer,
+                &i18n::message(footer),
                 X + 2.,
                 510.,
                 W - 4.,

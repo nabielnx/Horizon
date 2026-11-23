@@ -18,6 +18,10 @@ use windows::{
 };
 #[derive(Clone, Default)]
 pub struct Track {
+    pub generation: u64,
+    pub can_seek: bool,
+    pub seek_start: f64,
+    pub seek_feedback: Option<Instant>,
     pub source_app: String,
     pub album: String,
     pub title: String,
@@ -26,6 +30,7 @@ pub struct Track {
     pub position: f64,
     pub duration: f64,
     pub updated: Option<Instant>,
+    pub playback_rate: Option<f64>,
     pub cover: Option<Arc<Vec<u8>>>,
     pub cover_revision: u64,
     pub cover_error: String,
@@ -36,10 +41,55 @@ pub struct Track {
     pub lyrics: Arc<Vec<crate::lyrics::Line>>,
     pub lyrics_loaded: bool,
     pub lyrics_retry: Option<Instant>,
+    pub lyrics_status: crate::lyrics::Status,
+    pub lyrics_started: Option<Instant>,
+    pub lyrics_attempts: Vec<crate::lyrics::Attempt>,
     pub error: String,
     pub seek_guard: Option<(f64, Instant)>,
 }
+
+pub struct LyricFrame {
+    pub active: Option<usize>,
+    pub latest: Option<usize>,
+    pub outgoing: Option<(usize, f32)>,
+    pub entry: f32,
+}
+
 impl Track {
+    fn finish_seek(&mut self, generation: u64, target: f64, accepted: bool, now: Instant) {
+        if self.generation != generation {
+            return;
+        }
+        if accepted {
+            self.position = target;
+            self.updated = Some(now);
+            self.seek_guard = Some((target, now));
+            self.seek_feedback = None;
+        } else {
+            self.seek_guard = None;
+            self.seek_feedback = Some(now);
+        }
+    }
+
+    fn clear_lyrics(&mut self) {
+        self.lyrics = Arc::default();
+        self.lyrics_loaded = false;
+        self.lyrics_retry = None;
+        self.lyrics_status = crate::lyrics::Status::Searching;
+        self.lyrics_started = None;
+        self.lyrics_attempts.clear();
+    }
+
+    pub fn lyrics_message(&self) -> &'static str {
+        if self.title.is_empty() {
+            return "";
+        }
+        crate::i18n::tr(crate::lyrics::status_message(
+            self.lyrics_status,
+            self.lyrics_started
+                .map_or(Duration::ZERO, |at| at.elapsed()),
+        ))
+    }
     pub fn position_now(&self) -> f64 {
         let extra = if self.playing {
             self.updated
@@ -48,32 +98,98 @@ impl Track {
         } else {
             0.
         };
-        (self.position + extra).max(0.).min(self.duration.max(0.))
+        (self.position + extra * self.playback_rate.unwrap_or(1.))
+            .max(0.)
+            .min(self.duration.max(0.))
     }
     pub fn lyric_index(&self) -> Option<usize> {
-        if self.lyrics.is_empty() {
-            return None;
-        }
-        let at = self.position_now();
+        self.lyric_index_at(self.position_now())
+    }
+    pub fn next_lyric_time(&self, index: usize) -> f64 {
+        self.lyrics
+            .get(index + 1)
+            .map_or(self.duration, |line| line.at)
+    }
+    pub fn lyric_index_at(&self, at: f64) -> Option<usize> {
         let idx = self.lyrics.partition_point(|line| line.at <= at);
         let index = idx.checked_sub(1)?;
         let line = &self.lyrics[index];
-        if line.end.is_some_and(|end| at >= end) || line.text.is_empty() {
+        if at >= line.playback_end(self.next_lyric_time(index)) || line.text.is_empty() {
             None
         } else {
             Some(index)
         }
     }
+
+    pub fn lyric_frame(&self, at: f64, animate: bool) -> LyricFrame {
+        let started = self.lyrics.partition_point(|line| line.at <= at);
+        let active = self.lyric_index_at(at);
+        let latest = self.lyrics[..started]
+            .iter()
+            .rposition(|line| !line.text.is_empty());
+        let mut frame = LyricFrame {
+            active,
+            latest,
+            outgoing: None,
+            entry: 1.,
+        };
+        if !animate {
+            return frame;
+        }
+
+        let rate = self.playback_rate.unwrap_or(1.).max(0.01);
+        let progress = |elapsed: f64, seconds: f64| {
+            let t = (elapsed / (seconds * rate)).clamp(0., 1.) as f32;
+            t * t * (3. - 2. * t)
+        };
+        if let Some(index) = active {
+            frame.entry = progress(at - self.lyrics[index].at, 0.16);
+        }
+        let previous = match active {
+            Some(index) if frame.entry < 1. => self.lyrics[..index]
+                .iter()
+                .rposition(|line| !line.text.is_empty()),
+            Some(_) => None,
+            None => latest,
+        };
+        if let Some(index) = previous {
+            let end = self.lyrics[index].playback_end(self.next_lyric_time(index));
+            let fade = progress(at - end, 0.18);
+            if fade < 1. {
+                frame.outgoing = Some((index, fade));
+            }
+        }
+        frame
+    }
+
+    pub fn lyric_boundary_wait(&self, fallback: Duration) -> Duration {
+        let position = self.position_now();
+        let started = self.lyrics.partition_point(|line| line.at <= position);
+        let mut boundary = self
+            .lyrics
+            .get(started)
+            .map_or(f64::INFINITY, |line| line.at);
+        if let Some(index) = started.checked_sub(1) {
+            let line = &self.lyrics[index];
+            let end = line.playback_end(self.next_lyric_time(index));
+            if !line.text.is_empty() && end > position {
+                boundary = boundary.min(end);
+            }
+        }
+        let wait = (boundary - position) / self.playback_rate.unwrap_or(1.).max(0.01);
+        Duration::from_secs_f64(wait.clamp(0.001, fallback.as_secs_f64()))
+    }
 }
 pub enum Command {
     Refresh,
     Playback,
+    Timeline,
     LyricsChanged,
     CoverReady,
     Toggle,
     Previous,
     Next,
-    Seek(f64),
+    Seek { fraction: f64, generation: u64 },
 }
 pub struct Media {
     pub snapshot: Arc<Mutex<Track>>,
@@ -119,12 +235,31 @@ fn await_operation<T: windows::core::RuntimeType>(
     operation.GetResults()
 }
 
+fn thumbnail_error(stage: &str, error: windows::core::Error) -> windows::core::Error {
+    let (code, detail) = if error.code().is_ok() {
+        (
+            windows::Win32::Foundation::E_FAIL,
+            "Player returned no thumbnail object".to_owned(),
+        )
+    } else {
+        (error.code(), error.to_string())
+    };
+    windows::core::Error::new(code, format!("{stage}: {detail}"))
+}
+
 fn read_thumbnail(
     props: &GlobalSystemMediaTransportControlsSessionMediaProperties,
     alive: &impl Fn() -> bool,
 ) -> windows::core::Result<(Arc<Vec<u8>>, [u32; 3])> {
     let deadline = Instant::now() + Duration::from_secs(4);
-    let stream = await_operation(props.Thumbnail()?.OpenReadAsync()?, deadline, alive)?;
+    let reference = props
+        .Thumbnail()
+        .map_err(|e| thumbnail_error("Thumbnail metadata", e))?;
+    let operation = reference
+        .OpenReadAsync()
+        .map_err(|e| thumbnail_error("Open thumbnail", e))?;
+    let stream = await_operation(operation, deadline, alive)
+        .map_err(|e| thumbnail_error("Read thumbnail", e))?;
     let bytes = read_cover_stream(&windows::core::Interface::cast(&stream)?, deadline, alive);
     let _ = stream.Close();
     validated_thumbnail(bytes?).ok_or_else(|| {
@@ -198,7 +333,10 @@ fn keep_last_track(state: &Mutex<Track>, source_app: &str) -> bool {
     if data.source_app == source_app {
         return true;
     }
-    *data = Track::default();
+    *data = Track {
+        generation: data.generation.wrapping_add(1),
+        ..Track::default()
+    };
     false
 }
 fn same_song(data: &Track, source: &str, title: &str, artist: &str) -> bool {
@@ -209,8 +347,10 @@ fn remember_cover_failure(data: &mut Track, error: &str) {
         data.cover_failures.pop_front();
     }
     data.cover_failures.push_back(format!(
-        "{} | attempt {} | {} | {}",
+        "{} / {} / {:.3}s | attempt {} | {} | {}",
         data.title.chars().take(128).collect::<String>(),
+        data.album.chars().take(128).collect::<String>(),
+        data.duration,
         data.cover_attempts,
         chrono::Local::now().format("%H:%M:%S"),
         error.chars().take(512).collect::<String>()
@@ -228,10 +368,13 @@ fn apply_fallback(data: &mut Track, key: &str, art: crate::cover_fallback::Artwo
 }
 struct CoverJob {
     key: String,
+    generation: u64,
     session: GlobalSystemMediaTransportControlsSession,
+    properties: Option<GlobalSystemMediaTransportControlsSessionMediaProperties>,
 }
 struct CoverResult {
     key: String,
+    generation: u64,
     image: windows::core::Result<(Arc<Vec<u8>>, [u32; 3])>,
 }
 fn cover_worker(
@@ -246,24 +389,28 @@ fn cover_worker(
         }
         while let Ok(job) = receive.recv() {
             let alive = || {
-                state
-                    .lock()
-                    .is_ok_and(|track| track_cover_key(&track) == job.key)
+                state.lock().is_ok_and(|track| {
+                    track.generation == job.generation && track_cover_key(&track) == job.key
+                })
             };
             let image = (|| {
+                if let Some(props) = job.properties.as_ref() {
+                    return read_thumbnail(props, &alive);
+                }
                 let props = await_operation(
                     job.session.TryGetMediaPropertiesAsync()?,
                     Instant::now() + Duration::from_secs(2),
                     &alive,
                 )?;
-                let props_key = format!(
-                    "{}|{}|{}|{}",
-                    job.session.SourceAppUserModelId()?,
-                    props.Title()?,
-                    props.Artist()?,
-                    props.AlbumTitle()?
-                );
-                if props_key != job.key {
+                let source = job.session.SourceAppUserModelId()?.to_string();
+                let title = props.Title()?.to_string();
+                let artist = props.Artist()?.to_string();
+                let album = props.AlbumTitle().unwrap_or_default();
+                if !state.lock().is_ok_and(|track| {
+                    track.generation == job.generation
+                        && same_song(&track, &source, &title, &artist)
+                        && (album.is_empty() || album == track.album.as_str())
+                }) {
                     return Err(windows::core::Error::new(
                         windows::Win32::Foundation::E_ABORT,
                         "Cover belongs to a newer track",
@@ -274,6 +421,7 @@ fn cover_worker(
             if results
                 .send(CoverResult {
                     key: job.key,
+                    generation: job.generation,
                     image,
                 })
                 .is_err()
@@ -352,8 +500,40 @@ impl Media {
                 unsafe {
                     RoInitialize(RO_INIT_MULTITHREADED)?;
                 }
-                let manager =
-                    GlobalSystemMediaTransportControlsSessionManager::RequestAsync()?.join()?;
+                // A no-delay logon task can run before Windows media services
+                // are ready. Retry here on the worker instead of blocking the
+                // first panel or permanently losing the media session.
+                let mut manager_attempts = 0u8;
+                let manager = loop {
+                    let request = GlobalSystemMediaTransportControlsSessionManager::RequestAsync()
+                        .and_then(|operation| {
+                            await_operation(
+                                operation,
+                                Instant::now() + Duration::from_secs(3),
+                                &|| true,
+                            )
+                        });
+                    match request {
+                        Ok(manager) => {
+                            if let Ok(mut data) = state.lock() {
+                                data.error.clear();
+                            }
+                            break manager;
+                        }
+                        Err(error) => {
+                            if let Ok(mut data) = state.lock() {
+                                data.error = format!("Media Windows belum tersedia: {error}");
+                            }
+                            notify(&gui);
+                            manager_attempts = manager_attempts.saturating_add(1);
+                            std::thread::sleep(Duration::from_millis(if manager_attempts < 4 {
+                                500
+                            } else {
+                                2000
+                            }));
+                        }
+                    }
+                };
                 let tx = events.clone();
                 let _token =
                     manager.CurrentSessionChanged(&TypedEventHandler::new(move |_, _| {
@@ -366,8 +546,12 @@ impl Media {
                         let _ = tx_sess.send(Command::Refresh);
                         Ok(())
                     }))?;
-                let mut attached: Option<(GlobalSystemMediaTransportControlsSession, i64, i64)> =
-                    None;
+                let mut attached: Option<(
+                    GlobalSystemMediaTransportControlsSession,
+                    i64,
+                    i64,
+                    Option<i64>,
+                )> = None;
                 let mut refresh = true;
                 let mut requested: Option<(String, f64)> = None;
                 let mut cover_retries = 0u8;
@@ -387,11 +571,14 @@ impl Media {
                 );
                 let mut fallback_pending = false;
                 let mut next_fallback = Instant::now() + Duration::from_secs(4);
+                let mut timeline_changed = false;
                 loop {
+                    let mut fresh_properties = None;
                     while let Ok(result) = fallback_results.try_recv() {
                         fallback_pending = false;
                         if let Ok(mut data) = state.lock()
                             && fallback_config.load(Ordering::Relaxed)
+                            && data.generation == result.generation
                             && track_cover_key(&data) == result.key
                             && data.cover.is_none()
                         {
@@ -420,6 +607,7 @@ impl Media {
                             })
                             .map(|data| crate::cover_fallback::Job {
                                 key: track_cover_key(&data),
+                                generation: data.generation,
                                 title: data.title.clone(),
                                 artist: data.artist.clone(),
                                 album: data.album.clone(),
@@ -440,6 +628,7 @@ impl Media {
                     while let Ok(result) = cover_results.try_recv() {
                         cover_pending = false;
                         if let Ok(mut data) = state.lock()
+                            && data.generation == result.generation
                             && track_cover_key(&data) == result.key
                         {
                             match result.image {
@@ -480,9 +669,12 @@ impl Media {
                             } else {
                                 15
                             });
-                        if let Some((old, media, play)) = attached.take() {
+                        if let Some((old, media, play, timeline)) = attached.take() {
                             let _ = old.RemoveMediaPropertiesChanged(media);
                             let _ = old.RemovePlaybackInfoChanged(play);
+                            if let Some(timeline) = timeline {
+                                let _ = old.RemoveTimelinePropertiesChanged(timeline);
+                            }
                         }
                         let current_session = manager.GetCurrentSession().ok();
                         let mut valid_session = None;
@@ -517,6 +709,13 @@ impl Media {
                                     Ok(())
                                 },
                             ))?;
+                            let tx = events.clone();
+                            let timeline = session
+                                .TimelinePropertiesChanged(&TypedEventHandler::new(move |_, _| {
+                                    let _ = tx.send(Command::Timeline);
+                                    Ok(())
+                                }))
+                                .ok();
                             if let Ok(op) = session.TryGetMediaPropertiesAsync()
                                 && let Ok(props) = await_operation(
                                     op,
@@ -530,17 +729,23 @@ impl Media {
                                     props.Artist().map(|s| s.to_string()).unwrap_or_default();
                                 if title.is_empty() {
                                     let same_player = keep_last_track(&state, &source_app);
-                                    attached = Some((session, media, play));
+                                    attached = Some((session, media, play, timeline));
                                     next_metadata = Instant::now() + Duration::from_millis(500);
                                     if !same_player {
                                         requested = None;
                                     }
                                     notify(&gui);
                                 } else {
-                                    let album = props
+                                    let mut album = props
                                         .AlbumTitle()
                                         .map(|s| s.to_string())
                                         .unwrap_or_default();
+                                    if album.is_empty()
+                                        && let Ok(data) = state.lock()
+                                        && same_song(&data, &source_app, &title, &artist)
+                                    {
+                                        album.clone_from(&data.album);
+                                    }
                                     let track_key =
                                         format!("{}|{}|{}|{}", source_app, title, artist, album);
                                     let (changed, needs_cover) = state
@@ -574,11 +779,14 @@ impl Media {
                                         if let Ok(mut data) = state.lock() {
                                             if changed {
                                                 let song_changed =
-                                                    !same_song(&data, &source_app, &title, &artist);
+                                                    !same_song(&data, &source_app, &title, &artist)
+                                                        || !data.album.is_empty()
+                                                            && data.album != album;
                                                 if !song_changed {
                                                     // Album metadata may arrive late or disappear
                                                     // briefly. Keep this song's validated image.
                                                     data.album = album.clone();
+                                                    data.clear_lyrics();
                                                     if let Some(cover) = cover.clone() {
                                                         if data
                                                             .cover
@@ -593,6 +801,8 @@ impl Media {
                                                         data.palette = palette;
                                                     }
                                                 } else {
+                                                    data.generation =
+                                                        data.generation.wrapping_add(1);
                                                     data.source_app = source_app;
                                                     data.album = album;
                                                     data.title = title;
@@ -601,6 +811,7 @@ impl Media {
                                                     data.position = 0.;
                                                     data.updated = None;
                                                     data.seek_guard = None;
+                                                    data.seek_feedback = None;
                                                     data.cover = cover;
                                                     data.cover_source_url = None;
                                                     data.cover_revision =
@@ -608,9 +819,7 @@ impl Media {
                                                     data.palette = palette;
                                                     data.cover_error.clear();
                                                     data.cover_attempts = 0;
-                                                    data.lyrics = Arc::new(vec![]);
-                                                    data.lyrics_loaded = false;
-                                                    data.lyrics_retry = None;
+                                                    data.clear_lyrics();
                                                     data.error.clear();
                                                 }
                                                 should_notify = true;
@@ -629,13 +838,14 @@ impl Media {
                                             notify(&gui);
                                         }
                                     }
-                                    attached = Some((session, media, play));
+                                    fresh_properties = Some(props);
+                                    attached = Some((session, media, play, timeline));
                                 }
                             } else {
                                 // Preserve the last good snapshot on a transient
                                 // property failure from the same media player.
                                 let same_player = keep_last_track(&state, &source_app);
-                                attached = Some((session, media, play));
+                                attached = Some((session, media, play, timeline));
                                 next_metadata = Instant::now() + Duration::from_millis(500);
                                 if !same_player {
                                     requested = None;
@@ -649,14 +859,19 @@ impl Media {
                                 && missing_since.get_or_insert_with(Instant::now).elapsed()
                                     >= Duration::from_millis(1500)
                             {
-                                *data = Track::default();
+                                if !data.title.is_empty() {
+                                    *data = Track {
+                                        generation: data.generation.wrapping_add(1),
+                                        ..Track::default()
+                                    };
+                                }
                             }
                             requested = None;
                             notify(&gui);
                         }
                         refresh = false;
                     }
-                    if let Some((session, _, _)) = &attached {
+                    if let Some((session, _, _, _)) = &attached {
                         let mut alive = false;
                         if let (Ok(play), Ok(time)) =
                             (session.GetPlaybackInfo(), session.GetTimelineProperties())
@@ -672,10 +887,21 @@ impl Media {
                                     == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing;
                                 let changed = data.playing != playing;
                                 data.playing = playing;
+                                data.playback_rate = play
+                                    .PlaybackRate()
+                                    .ok()
+                                    .and_then(|rate| rate.Value().ok())
+                                    .filter(|rate| rate.is_finite() && *rate > 0.);
                                 if let (Ok(end), Ok(start)) = (time.EndTime(), time.StartTime()) {
+                                    data.seek_start = start.Duration as f64 / 10_000_000.;
                                     data.duration =
                                         (end.Duration - start.Duration) as f64 / 10_000_000.;
                                 }
+                                data.can_seek = data.duration > 0.
+                                    && play
+                                        .Controls()
+                                        .and_then(|controls| controls.IsPlaybackPositionEnabled())
+                                        .unwrap_or(false);
                                 let raw_time =
                                     time.LastUpdatedTime().map(|t| t.UniversalTime).unwrap_or(0);
                                 let since = if raw_time > 116_444_736_000_000_000 {
@@ -693,7 +919,12 @@ impl Media {
                                 };
                                 if let Ok(pos) = time.Position() {
                                     let incoming = (pos.Duration as f64 / 10_000_000.
-                                        + if playing { since } else { 0. })
+                                        - data.seek_start
+                                        + if playing {
+                                            since * data.playback_rate.unwrap_or(1.)
+                                        } else {
+                                            0.
+                                        })
                                     .clamp(0., data.duration.max(0.));
 
                                     let should_update = match data.seek_guard {
@@ -719,7 +950,7 @@ impl Media {
                                         data.updated = Some(Instant::now());
                                     }
                                 }
-                                if changed {
+                                if changed || timeline_changed {
                                     notify(&gui);
                                 }
                                 let key = format!("{}|{}", data.title, data.artist);
@@ -727,28 +958,33 @@ impl Media {
                                     && !data.title.is_empty()
                                     && lyric_request_due(&data, &requested, Instant::now())
                                 {
+                                    if requested.as_ref().is_some_and(|(_, duration)| {
+                                        (data.duration - duration).abs() >= 2.
+                                    }) {
+                                        data.clear_lyrics();
+                                    }
                                     data.lyrics_retry = None;
                                     if let Some(lines) = crate::lyrics::cached(
                                         &data.title,
                                         &data.artist,
                                         data.duration,
+                                        &data.album,
                                     )
                                     .filter(|lines| !lines.is_empty())
                                     {
-                                        data.lyrics = Arc::new(lines);
+                                        data.lyrics = lines;
                                         data.lyrics_loaded = true;
+                                        data.lyrics_status = crate::lyrics::Status::Ready;
                                         notify(&gui);
                                     }
-                                    if data.lyrics.is_empty()
-                                        || crate::lyrics::needs_refresh(
-                                            &data.title,
-                                            &data.artist,
-                                            data.duration,
-                                        )
-                                    {
+                                    if data.lyrics.is_empty() {
+                                        data.lyrics_status = crate::lyrics::Status::Searching;
+                                        data.lyrics_started = Some(Instant::now());
                                         let _ = lyric_jobs.send(crate::lyrics::Job {
+                                            generation: data.generation,
                                             title: data.title.clone(),
                                             artist: data.artist.clone(),
+                                            album: data.album.clone(),
                                             duration: data.duration,
                                         });
                                     }
@@ -768,7 +1004,9 @@ impl Media {
                                 })
                                 .map(|data| CoverJob {
                                     key: track_cover_key(&data),
+                                    generation: data.generation,
                                     session: session.clone(),
+                                    properties: fresh_properties,
                                 });
                             if let Some(job) = job
                                 && cover_jobs.try_send(job).is_ok()
@@ -783,6 +1021,7 @@ impl Media {
                             }
                         }
                     }
+                    timeline_changed = false;
                     let poll_timeout = if state
                         .lock()
                         .is_ok_and(|data| !data.title.is_empty() && data.cover.is_none())
@@ -802,6 +1041,7 @@ impl Media {
                             cover_retries = 0;
                         }
                         Ok(Command::CoverReady) => {}
+                        Ok(Command::Timeline) => timeline_changed = true,
                         Ok(Command::Playback) => {
                             next_cover = Instant::now();
                             refresh = true;
@@ -811,12 +1051,11 @@ impl Media {
                             if !config.load(Ordering::Relaxed)
                                 && let Ok(mut data) = state.lock()
                             {
-                                data.lyrics = Arc::new(vec![]);
-                                data.lyrics_loaded = false;
+                                data.clear_lyrics();
                             }
                         }
                         Ok(command) => {
-                            if let Some((session, _, _)) = &attached {
+                            if let Some((session, _, _, _)) = &attached {
                                 let action = match command {
                                     Command::Toggle => {
                                         session.TryTogglePlayPauseAsync().and_then(|operation| {
@@ -845,18 +1084,28 @@ impl Media {
                                             )
                                         })
                                     }
-                                    Command::Seek(fraction) => {
-                                        let duration =
-                                            state.lock().map(|s| s.duration).unwrap_or(0.);
-                                        let target = fraction.clamp(0., 1.) * duration;
-                                        if let Ok(mut snap) = state.lock() {
-                                            snap.position = target;
-                                            snap.updated = Some(Instant::now());
-                                            snap.seek_guard = Some((target, Instant::now()));
-                                        }
-                                        session
+                                    Command::Seek {
+                                        fraction,
+                                        generation,
+                                    } => {
+                                        let Some((target, start)) = state
+                                            .lock()
+                                            .ok()
+                                            .filter(|track| {
+                                                track.generation == generation && track.can_seek
+                                            })
+                                            .map(|track| {
+                                                (
+                                                    fraction.clamp(0., 1.) * track.duration,
+                                                    track.seek_start,
+                                                )
+                                            })
+                                        else {
+                                            continue;
+                                        };
+                                        let result = session
                                             .TryChangePlaybackPositionAsync(
-                                                (target * 10_000_000.) as i64,
+                                                ((start + target) * 10_000_000.) as i64,
                                             )
                                             .and_then(|operation| {
                                                 await_operation(
@@ -864,7 +1113,17 @@ impl Media {
                                                     Instant::now() + Duration::from_secs(2),
                                                     &|| true,
                                                 )
-                                            })
+                                            });
+                                        if let Ok(mut track) = state.lock() {
+                                            track.finish_seek(
+                                                generation,
+                                                target,
+                                                matches!(result, Ok(true)),
+                                                Instant::now(),
+                                            );
+                                        }
+                                        timeline_changed = true;
+                                        result
                                     }
                                     _ => Ok(false),
                                 };
@@ -928,6 +1187,21 @@ mod tests {
         assert!(validated_thumbnail(bytes).is_some());
     }
     #[test]
+    fn null_thumbnail_errors_report_missing_metadata_instead_of_success() {
+        let error = thumbnail_error("Thumbnail metadata", windows::core::Error::empty());
+        assert!(error.code().is_err());
+        assert!(
+            error
+                .to_string()
+                .contains("Player returned no thumbnail object")
+        );
+        let denied = thumbnail_error(
+            "Open thumbnail",
+            windows::core::Error::from_hresult(windows::Win32::Foundation::E_ACCESSDENIED),
+        );
+        assert_eq!(denied.code(), windows::Win32::Foundation::E_ACCESSDENIED);
+    }
+    #[test]
     fn fallback_cannot_replace_native_artwork_or_cross_a_track_boundary() {
         let mut data = Track {
             source_app: "player".into(),
@@ -959,6 +1233,15 @@ mod tests {
         assert!(!same_song(&data, "player", "B", "Artist"));
     }
     #[test]
+    fn no_track_has_no_lyrics_status_message() {
+        let track = Track {
+            lyrics_status: crate::lyrics::Status::Searching,
+            ..Default::default()
+        };
+        assert!(track.lyrics_message().is_empty());
+    }
+
+    #[test]
     fn lyric_selection_respects_exact_starts_ends_pause_and_seek() {
         let mut track = Track {
             duration: 10.,
@@ -988,6 +1271,56 @@ mod tests {
         track.position = 1.5;
         assert_eq!(track.lyric_index(), Some(0));
         assert_eq!(track.position_now(), 1.5);
+    }
+    #[test]
+    fn lyric_exit_fades_without_delaying_the_next_timestamp() {
+        let mut track = Track {
+            duration: 12.,
+            lyrics: Arc::new(vec![
+                crate::lyrics::Line {
+                    at: 1.,
+                    text: "First".into(),
+                    ..Default::default()
+                },
+                crate::lyrics::Line {
+                    at: 2.,
+                    end: Some(3.),
+                    text: "Second".into(),
+                    ..Default::default()
+                },
+                crate::lyrics::Line {
+                    at: 3.,
+                    ..Default::default()
+                },
+                crate::lyrics::Line {
+                    at: 5.,
+                    text: "Third".into(),
+                    ..Default::default()
+                },
+            ]),
+            ..Default::default()
+        };
+        assert_eq!(track.lyric_frame(1.999, true).active, Some(0));
+        let switch = track.lyric_frame(2., true);
+        assert_eq!(switch.active, Some(1));
+        assert_eq!(switch.outgoing, Some((0, 0.)));
+        assert_eq!(switch.entry, 0.);
+        let gap = track.lyric_frame(3.08, true);
+        assert_eq!(gap.active, None);
+        assert_eq!(gap.latest, Some(1));
+        assert!(
+            gap.outgoing
+                .is_some_and(|(index, fade)| { index == 1 && fade > 0. && fade < 1. })
+        );
+        assert_eq!(track.lyric_frame(3.5, true).outgoing, None);
+        assert_eq!(track.lyric_frame(2., false).outgoing, None);
+        assert_eq!(track.lyric_frame(2., false).active, Some(1));
+        track.position = 4.96;
+        assert_eq!(
+            track.lyric_boundary_wait(Duration::from_millis(250)),
+            Duration::from_millis(40)
+        );
+        assert_eq!(track.lyric_frame(5., true).active, Some(3));
     }
     #[test]
     fn temporary_metadata_failure_keeps_the_same_players_cover_and_lyrics() {
@@ -1090,6 +1423,25 @@ mod tests {
         );
         assert_eq!(cache.len(), 2);
     }
+    #[test]
+    fn failed_or_stale_seek_cannot_reposition_the_lyrics_clock() {
+        let now = Instant::now();
+        let mut track = Track {
+            generation: 12,
+            duration: 180.,
+            position: 20.,
+            ..Default::default()
+        };
+        track.finish_seek(11, 80., true, now);
+        assert_eq!(track.position_now(), 20.);
+        track.finish_seek(12, 80., false, now);
+        assert_eq!(track.position_now(), 20.);
+        assert_eq!(track.seek_feedback, Some(now));
+        track.finish_seek(12, 80., true, now);
+        assert_eq!(track.position_now(), 80.);
+        assert!(track.seek_feedback.is_none());
+    }
+
     #[test]
     fn paused_track_position_and_lyrics_stay_frozen() {
         let t = Track {

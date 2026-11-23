@@ -16,15 +16,15 @@ impl Window {
             let running = state.running.is_some();
             let paused = !running && left > 0 && left < total;
             let (status, ink) = if left == 0 {
-                ("Selesai", 0x9bcdbb)
+                (i18n::tr("Selesai"), 0x9bcdbb)
             } else if running {
-                ("Berjalan", 0xe6a3af)
+                (i18n::tr("Berjalan"), 0xe6a3af)
             } else if paused {
-                ("Dijeda", 0xffffff)
+                (i18n::tr("Dijeda"), 0xffffff)
             } else {
-                ("Siap mulai", 0x9baab5)
+                (i18n::tr("Siap mulai"), 0x9baab5)
             };
-            c.text("Fokus", x, 34., 100., 14., true, INK);
+            c.text(i18n::tr("Fokus"), x, 34., 100., 14., true, INK);
             let status_w = c.measure_text(status, 10., false);
             let status_x = x + cw - status_w;
             c.ellipse(status_x - 12., 40., 4., 4., ink);
@@ -37,7 +37,7 @@ impl Window {
             c.outline(x, 64., timer_w, timer_h, 11., 0x473442);
             c.glass_edge(x, 64., timer_w, timer_h, 11., 0.);
             c.text(
-                "WAKTU TERSISA",
+                i18n::tr("WAKTU TERSISA"),
                 x + 16.,
                 if narrow { 76. } else { 81. },
                 timer_w - 32.,
@@ -55,7 +55,11 @@ impl Window {
                 true,
                 if left == 0 { 0xb3d9c8 } else { 0xe9edf1 },
             );
-            let duration = format!("dari {} menit", state.data.settings.focus_minutes);
+            let duration = i18n::format!(
+                "dari {} menit",
+                "of {} min",
+                state.data.settings.focus_minutes
+            );
             if !narrow {
                 c.center(&duration, x, 168., timer_w, 10., false, 0x8c9ba9);
             }
@@ -80,7 +84,7 @@ impl Window {
             let controls_w = if narrow { cw } else { cw - timer_w - 14. };
             if !narrow {
                 c.text(
-                    "Durasi sesi",
+                    i18n::tr("Durasi sesi"),
                     controls_x,
                     66.,
                     controls_w,
@@ -128,13 +132,13 @@ impl Window {
                 },
                 Action::Focus,
                 if running {
-                    "Jeda"
+                    i18n::tr("Jeda")
                 } else if left == 0 {
-                    "Mulai lagi"
+                    i18n::tr("Mulai lagi")
                 } else if paused {
-                    "Lanjut"
+                    i18n::tr("Lanjut")
                 } else {
-                    "Mulai"
+                    i18n::tr("Mulai")
                 },
                 Control::Primary,
             );

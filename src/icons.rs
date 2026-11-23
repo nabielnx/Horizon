@@ -24,12 +24,20 @@ pub unsafe fn outline(factory: &ID2D1Factory, name: &str) -> Result<ID2D1Geometr
             }
             "droplet" | "drop" => include_str!("../assets/icons/drop.svg"),
             "list-checks" => include_str!("../assets/icons/list-checks.svg"),
+            "monitor-pulse" => {
+                r#"<path d="M2 11H6L9 5L13 19L16.5 11H22V13H17.75L12.5 23L8.5 10.5L7.25 13H2Z"/>"#
+            }
             "play" => include_str!("../assets/icons/play.svg"),
             "pause" => include_str!("../assets/icons/pause.svg"),
             "skip-back" => include_str!("../assets/icons/skip-back.svg"),
             "skip-forward" => include_str!("../assets/icons/skip-forward.svg"),
             "rotate-ccw" | "repeat" => include_str!("../assets/icons/repeat.svg"),
             "sliders-horizontal" => include_str!("../assets/icons/sliders-horizontal.svg"),
+            "settings-gear" => {
+                let source = include_str!("../assets/figma/nav-settings.svg");
+                let glyph = source.find("<path ").expect("Settings gear path");
+                return from_svg_scaled(factory, &source[glyph..], 24. / 40.);
+            }
             "headphones" => include_str!("../assets/icons/headphones.svg"),
             "x" => include_str!("../assets/icons/x.svg"),
             "plus" => include_str!("../assets/icons/plus.svg"),
@@ -37,6 +45,9 @@ pub unsafe fn outline(factory: &ID2D1Factory, name: &str) -> Result<ID2D1Geometr
             "info" => include_str!("../assets/icons/info.svg"),
             "sparkles" | "sparkle" => include_str!("../assets/icons/sparkle.svg"),
             "mic-2" | "microphone-stage" => include_str!("../assets/icons/microphone-stage.svg"),
+            "speaker" => include_str!("../assets/icons/speaker.svg"),
+            "speaker-muted" => include_str!("../assets/icons/speaker-muted.svg"),
+            "search" => include_str!("../assets/icons/search.svg"),
             "heart" => include_str!("../assets/icons/heart.svg"),
             "heart-fill" => include_str!("../assets/icons/heart-fill.svg"),
             "clock" => include_str!("../assets/icons/clock.svg"),
@@ -53,11 +64,23 @@ pub unsafe fn outline(factory: &ID2D1Factory, name: &str) -> Result<ID2D1Geometr
                 ));
             }
         };
-        let scale: f64 = if source.contains("256") {
-            24.0 / 256.0
-        } else {
-            1.0
-        };
+        from_svg(factory, source)
+    }
+}
+pub unsafe fn from_svg(factory: &ID2D1Factory, source: &str) -> Result<ID2D1Geometry> {
+    let scale = if source.contains("256") {
+        24. / 256.
+    } else {
+        1.
+    };
+    unsafe { from_svg_scaled(factory, source, scale) }
+}
+unsafe fn from_svg_scaled(
+    factory: &ID2D1Factory,
+    source: &str,
+    scale: f64,
+) -> Result<ID2D1Geometry> {
+    unsafe {
         let mut shapes: Vec<Option<ID2D1Geometry>> = vec![];
         for tag in source.split('<') {
             let geom: Option<ID2D1Geometry> = if tag.starts_with("path ") {

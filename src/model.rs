@@ -2,6 +2,23 @@ use chrono::{Local, Timelike};
 use serde::{Deserialize, Serialize};
 use std::{fs, io, path::PathBuf};
 
+pub const ASSISTANT_OPACITY: usize = 9;
+pub const MONITOR_OPACITY: usize = 10;
+pub const OPACITY_SURFACES: usize = 11;
+pub const OPACITY_SETTING_START: usize = 21;
+pub const SETTINGS_COUNT: usize = OPACITY_SETTING_START + OPACITY_SURFACES;
+
+fn deserialize_opacity_overrides<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<[Option<u8>; OPACITY_SURFACES], D::Error> {
+    let values = Vec::<Option<u8>>::deserialize(deserializer)?;
+    let mut overrides = [None; OPACITY_SURFACES];
+    for (slot, value) in overrides.iter_mut().zip(values) {
+        *slot = value;
+    }
+    Ok(overrides)
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -9,16 +26,27 @@ pub struct Settings {
     pub design_revision: u32,
     pub width: i32,
     pub opacity: u8,
+    #[serde(deserialize_with = "deserialize_opacity_overrides")]
+    pub opacity_overrides: [Option<u8>; OPACITY_SURFACES],
+    pub language: crate::i18n::Language,
     pub radius: i32,
     pub motion: bool,
     pub sound: bool,
     pub startup: bool,
     pub taskbar_layout: bool,
+    pub dynamic_island: bool,
+    pub monitor_in_compact: bool,
     pub cover_fallback: bool,
     pub theme: usize,
     pub album_colors: bool,
     pub show_lyrics: bool,
+    pub spotify_client_id: String,
+    pub ai_model: usize,
+    pub ai_provider: usize,
+    pub ai_models: [String; crate::assistant::PROVIDERS.len()],
+    pub ai_endpoint: String,
     pub focus_minutes: u32,
+    pub focus_break_minutes: u32,
     pub water_goal: u32,
     pub cup: u32,
     pub water_interval: u32,
@@ -33,16 +61,26 @@ impl Default for Settings {
             design_revision: 2,
             width: 680,
             opacity: 255,
+            opacity_overrides: [None; OPACITY_SURFACES],
+            language: crate::i18n::Language::default(),
             radius: 21,
             motion: true,
             sound: true,
             startup: false,
             taskbar_layout: false,
+            dynamic_island: false,
+            monitor_in_compact: false,
             cover_fallback: false,
             theme: 0,
             album_colors: true,
             show_lyrics: true,
+            spotify_client_id: String::new(),
+            ai_model: 0,
+            ai_provider: 0,
+            ai_models: Default::default(),
+            ai_endpoint: String::new(),
             focus_minutes: 25,
+            focus_break_minutes: 5,
             water_goal: 2000,
             cup: 250,
             water_interval: 60,
@@ -57,7 +95,10 @@ impl Settings {
     pub fn adjust(&mut self, key: usize, delta: i32) -> Result<(), String> {
         match key {
             0 => self.width = self.width.saturating_add(delta),
-            1 => self.opacity = (self.opacity as i32 + delta).clamp(166, 255) as u8,
+            1 => {
+                self.opacity = (self.opacity as i32 + delta).clamp(51, 255) as u8;
+                self.opacity_overrides = [None; OPACITY_SURFACES];
+            }
             2 => self.radius = self.radius.saturating_add(delta),
             3 => self.theme = (self.theme as i32 + delta).rem_euclid(3) as usize,
             4 => self.motion = !self.motion,
@@ -78,12 +119,28 @@ impl Settings {
             16 => self.show_lyrics = !self.show_lyrics,
             17 => self.taskbar_layout = !self.taskbar_layout,
             18 => self.cover_fallback = !self.cover_fallback,
+            19 => self.dynamic_island = delta > 0,
+            20 => {
+                self.language = if delta > 0 {
+                    crate::i18n::Language::English
+                } else {
+                    crate::i18n::Language::Indonesian
+                }
+            }
+            OPACITY_SETTING_START..SETTINGS_COUNT => {
+                let surface = key - OPACITY_SETTING_START;
+                self.opacity_overrides[surface] =
+                    Some((self.opacity_for(surface) as i32 + delta).clamp(51, 255) as u8)
+            }
             _ => return Err("Pengaturan tidak dikenal.".into()),
         }
         self.normalize();
         Ok(())
     }
     pub fn normalize(&mut self) {
+        if ![3, 5, 10].contains(&self.focus_break_minutes) {
+            self.focus_break_minutes = 5;
+        }
         if self.design_revision == 0 {
             self.width = 591;
             self.design_revision = 1;
@@ -95,7 +152,12 @@ impl Settings {
             self.design_revision = 2;
         }
         self.width = self.width.clamp(360, 680);
-        self.opacity = self.opacity.max(166);
+        self.ai_model = self.ai_model.min(1);
+        self.ai_provider = self.ai_provider.min(crate::assistant::CUSTOM);
+        self.opacity = self.opacity.max(51);
+        for value in self.opacity_overrides.iter_mut().flatten() {
+            *value = (*value).max(51);
+        }
         self.radius = self.radius.clamp(8, 32);
         self.theme %= 3;
         self.focus_minutes = self.focus_minutes.clamp(1, 180);
@@ -105,6 +167,15 @@ impl Settings {
         self.water_start_hour = self.water_start_hour.min(23);
         self.water_end_hour = self.water_end_hour.min(23);
         self.event_lead_minutes = self.event_lead_minutes.min(60);
+    }
+}
+impl Settings {
+    pub fn opacity_for(&self, surface: usize) -> u8 {
+        self.opacity_overrides
+            .get(surface)
+            .copied()
+            .flatten()
+            .unwrap_or(self.opacity)
     }
 }
 #[derive(Clone, Serialize, Deserialize)]
@@ -138,6 +209,7 @@ pub struct ShelfFile {
 #[serde(default)]
 pub struct Data {
     pub focus_history: std::collections::BTreeMap<String, u64>,
+    pub focus: crate::focus::Session,
     pub reminders: crate::reminders::Queue,
     pub focus_remaining: Option<u64>,
     pub settings: Settings,
@@ -163,6 +235,7 @@ impl Data {
             Self::default()
         };
         data.settings.normalize();
+        data.focus.task = data.focus.task.filter(|&i| i < data.tasks.len());
         data.reset_day();
         Ok(data)
     }

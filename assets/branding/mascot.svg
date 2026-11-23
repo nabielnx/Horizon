@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 120" width="200" height="120">
+  <defs>
+    <linearGradient id="violet" x2=".6" y2="1"><stop stop-color="#8d759f"/><stop offset=".5" stop-color="#655071"/><stop offset="1" stop-color="#35293f"/></linearGradient>
+    <linearGradient id="body" x2=".8" y2="1"><stop stop-color="#6e557e"/><stop offset="1" stop-color="#34283e"/></linearGradient>
+    <linearGradient id="face-paint" x2=".7" y2="1"><stop stop-color="#f6e9e2"/><stop offset="1" stop-color="#cdb8c7"/></linearGradient>
+    <linearGradient id="amber" x2="1" y2="1"><stop stop-color="#ffd38b"/><stop offset="1" stop-color="#d79551"/></linearGradient>
+  </defs>
+  <path id="back-leg" fill="url(#body)" d="M105 101 C118 89 129 96 137 105 L151 113 C158 117 152 120 142 118 L124 113 L112 117 Z"/>
+  <path id="back-foot" fill="url(#violet)" d="M137 111 C140 101 149 92 156 98 C165 104 166 117 159 120 L144 120 C139 120 135 116 137 111 Z"/>
+  <path id="torso" fill="url(#body)" d="M80 74 C92 68 108 73 113 87 C118 101 124 111 114 117 C109 120 103 120 100 120 C87 120 79 115 77 106 C73 95 73 82 80 74 Z"/>
+  <path id="support" fill="url(#violet)" d="M79 80 C62 76 42 73 33 81 C30 84 29 87 29 89 C30 93 35 95 38 91 C40 97 45 102 51 100 C59 98 52 89 51 85 C62 85 69 88 80 89 Z"/>
+  <path id="front-leg" fill="url(#body)" d="M103 107 C113 96 127 100 138 112 L151 114 L151 120 L128 119 L115 116 L106 120 Z"/>
+  <path id="front-foot" fill="url(#violet)" d="M150 112 C157 99 170 92 179 99 C190 108 188 119 180 120 L156 120 C150 120 146 118 150 112 Z"/>
+  <path id="badge" fill="url(#amber)" d="M97 81 C91 84 92 94 99 96 C105 98 111 94 112 89 C104 96 96 90 97 81 Z"/>
+  <path id="arm" d="M109 84 Q87 104 114 101" fill="none" stroke="url(#violet)" stroke-width="10" stroke-linecap="round"/>
+  <path id="hand" fill="url(#violet)" d="M108 99 C107 94 111 92 115 95 C119 92 124 97 122 103 C120 110 109 109 108 104 Z"/>
+  <path id="head" fill="url(#violet)" d="M88 6 C107 -1 118 5 113 17 C104 29 106 35 120 41 C133 51 126 68 111 75 C96 85 65 85 45 76 C22 65 24 42 40 25 C54 12 72 6 88 6 Z"/>
+  <path id="face" fill="url(#face-paint)" d="M62 29 C75 21 92 23 103 35 C107 41 114 43 117 48 C121 61 106 72 88 74 C67 79 43 70 42 55 C39 44 49 34 62 29 Z"/>
+  <path id="shine" fill="#e2cfef" opacity=".26" d="M42 32 C52 17 79 7 96 8 C73 14 56 24 45 40 C41 44 39 38 42 32 Z"/>
+  <ellipse cx="66" cy="51" rx="4.8" ry="6" fill="#292332"/>
+  <ellipse cx="96" cy="48" rx="4.8" ry="6" fill="#292332"/>
+  <circle cx="67.2" cy="49.2" r="1.4" fill="#ffffff"/>
+  <circle cx="97.2" cy="46.2" r="1.4" fill="#ffffff"/>
+  <path id="smile" d="M79 61 Q84 66 90 59" fill="none" stroke="#292332" stroke-width="1.8" stroke-linecap="round"/>
+</svg>

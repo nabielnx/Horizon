@@ -7,6 +7,14 @@ pub const STATE: f32 = 0.26;
 pub const CONTENT: f32 = 0.22;
 pub const PAGE: f32 = 0.30;
 pub const SHELL: f32 = 0.28;
+pub const ENTRANCE_SECONDS: f32 = 0.42;
+pub fn entrance_progress(start: Option<Instant>, now: Instant) -> f32 {
+    start.map_or(1., |start| {
+        let t =
+            (now.saturating_duration_since(start).as_secs_f32() / ENTRANCE_SECONDS).clamp(0., 1.);
+        1. - (1. - t).powi(4)
+    })
+}
 
 /// Retarget from the visible value, including rapid pointer reversals.
 pub struct Tween {
@@ -227,6 +235,22 @@ impl Drop for FrameClock {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn entrance_is_monotonic_and_finishes_without_an_extra_delay() {
+        let start = super::Instant::now();
+        let mut previous = 0.;
+        for frame in 0..=120 {
+            let value = super::entrance_progress(
+                Some(start),
+                start + super::Duration::from_secs_f32(frame as f32 / 120.),
+            );
+            assert!(value >= previous && value <= 1.);
+            previous = value;
+        }
+        assert_eq!(super::entrance_progress(Some(start), start), 0.);
+        assert_eq!(previous, 1.);
+        assert_eq!(super::entrance_progress(None, start), 1.);
+    }
     use super::*;
     #[test]
     fn glow_paths_are_stable_random_smooth_and_bounded() {

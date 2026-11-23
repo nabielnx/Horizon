@@ -218,12 +218,21 @@ pub(super) fn in_view(bounds: Bounds, panel_height: i32) -> bool {
     bounds.y >= 22 && bounds.y + bounds.height <= panel_height - 12
 }
 
-pub(super) unsafe fn place(edit: HWND, bounds: Bounds, visible: bool) {
+pub(super) unsafe fn place(edit: HWND, bounds: Bounds, visible: bool, dpi: dpi::Scale) {
     unsafe {
         // Move before showing so a new control never flashes at its old position.
         if visible {
             let b = bounds.edit();
-            let _ = MoveWindow(edit, b.x, b.y, b.width, b.height, true);
+            let x = dpi.px(b.x);
+            let y = dpi.px(b.y);
+            let _ = MoveWindow(
+                edit,
+                x,
+                y,
+                dpi.px(b.x + b.width) - x,
+                dpi.px(b.y + b.height) - y,
+                true,
+            );
             let _ = ShowWindow(edit, SW_SHOW);
             let _ = InvalidateRect(Some(edit), None, true);
         } else {
@@ -239,8 +248,23 @@ fn fields(w: &Window) -> [Option<(HWND, Bounds)>; 4] {
         return fields;
     }
     let settings = &w.shared.borrow().data.settings;
+    if w.page == 0
+        && w.spotify_search_input_ready(settings.motion)
+        && !w.spotify_search.edit.is_invalid()
+        && w.overlay.as_ref().is_none_or(|overlay| !overlay.shell)
+    {
+        fields[0] = Some((
+            w.spotify_search.edit,
+            spotify_ui::edit_bounds(settings.width, w.spotify_search.mode),
+        ));
+        return fields;
+    }
     if w.page == 4 {
         fields[0] = Some((w.input, task_bounds(settings.width)));
+        return fields;
+    }
+    if w.page == assistant::PAGE && !w.ai_input.is_invalid() {
+        fields[0] = Some((w.ai_input, assistant_ui::prompt_bounds(settings.width)));
         return fields;
     }
     if w.page != 2 || !w.calendar.form {
@@ -254,7 +278,7 @@ fn fields(w: &Window) -> [Option<(HWND, Bounds)>; 4] {
 }
 
 pub(super) unsafe fn draw_fields(c: &Canvas, w: &Window) {
-    if !w.settings && w.page == 4 {
+    if !w.settings && matches!(w.page, 0 | 4) {
         return;
     }
     unsafe {

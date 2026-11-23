@@ -10,7 +10,8 @@ use windows::Win32::{
     },
     UI::WindowsAndMessaging::{
         GWL_STYLE, GetClassNameW, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect,
-        GetWindowThreadProcessId, IsIconic, IsWindowVisible, IsZoomed, WS_CAPTION, WS_THICKFRAME,
+        GetWindowThreadProcessId, IsIconic, IsWindowVisible, IsZoomed, WS_CAPTION, WS_MAXIMIZEBOX,
+        WS_MINIMIZEBOX, WS_SYSMENU, WS_THICKFRAME,
     },
 };
 
@@ -97,7 +98,7 @@ impl Mode {
         let (width, height, shape) = match self {
             Self::Expanded => (width, crate::EXPANDED_HEIGHT as f32, 1.),
             Self::Peek => (width.min(591.), 101., 0.),
-            Self::Compact => (310., 50., 0.),
+            Self::Compact => (310., crate::layout::COMPACT_HEIGHT, 0.),
             Self::Indicator => (54., 6., 0.),
             Self::Hidden => (0., 0., 0.),
         };
@@ -117,8 +118,10 @@ pub struct Inputs {
     pub fullscreen: bool,
     /// True only for ShowLyrics && has_track && playing, not ShowLyrics alone.
     pub lyrics_pinned: bool,
+    pub monitor_pinned: bool,
     pub hide_fullscreen: bool,
     pub has_alert: bool,
+    pub taskbar_overlay: bool,
 }
 
 impl Default for Inputs {
@@ -129,8 +132,10 @@ impl Default for Inputs {
             other_app: false,
             fullscreen: false,
             lyrics_pinned: false,
+            monitor_pinned: false,
             hide_fullscreen: true,
             has_alert: false,
+            taskbar_overlay: false,
         }
     }
 }
@@ -144,7 +149,12 @@ pub fn decide(input: Inputs) -> Mode {
         Mode::Hidden
     } else if input.hovered {
         Mode::Peek
-    } else if input.other_app && !input.lyrics_pinned && !input.has_alert {
+    } else if input.other_app
+        && !input.taskbar_overlay
+        && !input.lyrics_pinned
+        && !input.monitor_pinned
+        && !input.has_alert
+    {
         Mode::Indicator
     } else {
         Mode::Compact
@@ -205,6 +215,13 @@ fn classify(bounds: Bounds, monitor: Bounds, maximized: bool, decorated: bool) -
     }
 }
 
+fn normal_window_chrome(style: u32) -> bool {
+    // Frameless desktop apps can keep maximize/system-menu controls without
+    // WS_CAPTION or a resize frame. IsZoomed + those controls is maximization.
+    style & (WS_CAPTION.0 | WS_THICKFRAME.0 | WS_SYSMENU.0 | WS_MINIMIZEBOX.0 | WS_MAXIMIZEBOX.0)
+        != 0
+}
+
 /// Read-only foreground classification for the monitor containing Horizon.
 /// A fullscreen app on another monitor does not hide this notch. No focus,
 /// activation, input injection, hook, or window mutation occurs here.
@@ -259,7 +276,7 @@ pub unsafe fn foreground(root: HWND, settings: HWND) -> Foreground {
             };
         }
         let style = GetWindowLongPtrW(current, GWL_STYLE) as u32;
-        let decorated = style & (WS_CAPTION.0 | WS_THICKFRAME.0) != 0;
+        let decorated = normal_window_chrome(style);
         classify(
             bounds.into(),
             info.rcMonitor.into(),
@@ -272,6 +289,52 @@ pub unsafe fn foreground(root: HWND, settings: HWND) -> Foreground {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn taskbar_overlay_keeps_idle_visible_without_music_in_normal_apps() {
+        let idle = Inputs {
+            other_app: true,
+            taskbar_overlay: true,
+            ..Default::default()
+        };
+        assert_eq!(decide(idle), Mode::Compact);
+        assert_eq!(
+            decide(Inputs {
+                hovered: true,
+                ..idle
+            }),
+            Mode::Peek
+        );
+        assert_eq!(
+            decide(Inputs {
+                expanded: true,
+                ..idle
+            }),
+            Mode::Expanded
+        );
+        assert_eq!(
+            decide(Inputs {
+                fullscreen: true,
+                ..idle
+            }),
+            Mode::Hidden
+        );
+    }
+
+    #[test]
+    fn frameless_maximized_desktop_controls_do_not_imply_fullscreen() {
+        let monitor = Bounds {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+        let frameless = WS_SYSMENU.0 | WS_MINIMIZEBOX.0 | WS_MAXIMIZEBOX.0;
+        assert!(normal_window_chrome(frameless));
+        assert!(!classify(monitor, monitor, true, normal_window_chrome(frameless)).fullscreen);
+        assert!(classify(monitor, monitor, false, normal_window_chrome(frameless)).fullscreen);
+        assert!(classify(monitor, monitor, true, normal_window_chrome(0)).fullscreen);
+    }
 
     #[test]
     fn indicator_opens_directly_to_peek_and_reverses_from_visible_bounds() {
@@ -321,6 +384,30 @@ mod tests {
     }
 
     #[test]
+    fn monitor_pin_preserves_hover_and_fullscreen_policy() {
+        let pinned = Inputs {
+            other_app: true,
+            monitor_pinned: true,
+            ..Default::default()
+        };
+        assert_eq!(decide(pinned), Mode::Compact);
+        assert_eq!(
+            decide(Inputs {
+                hovered: true,
+                ..pinned
+            }),
+            Mode::Peek
+        );
+        assert_eq!(
+            decide(Inputs {
+                fullscreen: true,
+                ..pinned
+            }),
+            Mode::Hidden
+        );
+    }
+
+    #[test]
     fn hover_reveals_indicator_and_desktop_restores_compact() {
         assert_eq!(
             decide(Inputs {
@@ -359,12 +446,12 @@ mod tests {
     }
 
     #[test]
-    fn dimensions_match_approved_figma_layout() {
+    fn dimensions_keep_peek_and_panel_with_compact_fitting_the_taskbar() {
         assert_eq!(
             Mode::Compact.size(560.),
             Size {
                 width: 310.,
-                height: 50.,
+                height: 42.,
                 shape: 0.
             }
         );

@@ -69,21 +69,67 @@ pub fn lyric_rows(
 }
 
 // The same contour drives Win32 clipping and render verification.
+// The floating compact shell, including its gap and 1px region guard, fits
+// inside a 48px top taskbar without extending into the application below it.
+pub const COMPACT_HEIGHT: f32 = 42.;
+pub const ISLAND_COMPACT_HEIGHT: f32 = 34.;
+pub const COMPACT_BUFFER_HEIGHT: u32 = COMPACT_HEIGHT as u32 + 1;
+pub const ISLAND_GAP: f32 = 5.;
+
+pub fn island_gap(taskbar_height: Option<i32>, compact: f32) -> f32 {
+    let Some(height) = taskbar_height else {
+        return ISLAND_GAP;
+    };
+    let centered = ((height as f32 - ISLAND_COMPACT_HEIGHT) / 2.).max(0.);
+    ISLAND_GAP + (centered - ISLAND_GAP) * compact.clamp(0., 1.)
+}
+
+pub fn compact_width(floating: f32) -> f32 {
+    310. - 60. * floating.clamp(0., 1.)
+}
+
+pub fn compact_height(floating: f32) -> f32 {
+    COMPACT_HEIGHT + (ISLAND_COMPACT_HEIGHT - COMPACT_HEIGHT) * floating.clamp(0., 1.)
+}
+
+pub fn compact_activity_width(floating: f32, activity: f32) -> f32 {
+    let floating = floating.clamp(0., 1.);
+    let quiet = 154. - 6. * floating;
+    quiet + (compact_width(floating) - quiet) * activity.clamp(0., 1.)
+}
+
+pub fn island_corner_radius(w: f32, h: f32, radius: f32) -> f32 {
+    let compact = ((101. - h) / (101. - COMPACT_HEIGHT)).clamp(0., 1.);
+    let expanded = ((h - 101.) / 179.).clamp(0., 1.);
+    let idle = h / 2. * compact + 44. * (1. - compact);
+    (idle * (1. - expanded) + radius * 0.72 * expanded)
+        .min(h / 2.)
+        .min(w / 2.)
+}
+
 pub fn contour(w: f32, h: f32, p: f32, radius: f32) -> Vec<(f32, f32)> {
+    contour_styled(w, h, p, radius, 0.)
+}
+
+/// Shared antialiased mask and hit region, including the notch-to-island morph.
+pub fn contour_styled(w: f32, h: f32, p: f32, radius: f32, floating: f32) -> Vec<(f32, f32)> {
     let p = p.clamp(0., 1.);
-    let shoulder = 14. * (1. - p);
-    let shoulder_h = 14. * (1. - p);
-    let bottom = (radius + 2.).min(h * 0.48).max(4.);
+    let floating = floating.clamp(0., 1.);
+    let shoulder = 14. * (1. - p) * (1. - floating);
+    let island_radius = island_corner_radius(w, h, radius);
+    let top = island_radius * floating;
+    let shoulder_h = shoulder + top;
+    let bottom = (radius + 2.).min(h * 0.48).max(4.) * (1. - floating) + island_radius * floating;
     let k = 0.552_284_8;
 
     // Top edge: flat against the screen bezel from 0 to w.
-    let mut points = vec![(0., 0.), (w, 0.)];
+    let mut points = vec![(top, 0.), (w - top, 0.)];
 
-    if shoulder > 0.05 {
+    if shoulder_h > 0.05 {
         // Right flared shoulder (concave curve from screen edge into notch body):
         curve(
             &mut points,
-            (w - shoulder * k, 0.),
+            (w - top + top * k - shoulder * k, 0.),
             (w - shoulder, shoulder_h * (1. - k)),
             (w - shoulder, shoulder_h),
         );
@@ -114,13 +160,13 @@ pub fn contour(w: f32, h: f32, p: f32, radius: f32) -> Vec<(f32, f32)> {
     // Left body side
     points.push((shoulder, shoulder_h));
 
-    if shoulder > 0.05 {
+    if shoulder_h > 0.05 {
         // Left flared shoulder (concave curve back out to top-left screen edge):
         curve(
             &mut points,
             (shoulder, shoulder_h * (1. - k)),
-            (shoulder * k, 0.),
-            (0., 0.),
+            (top - top * k + shoulder * k, 0.),
+            (top, 0.),
         );
     }
 
@@ -147,6 +193,46 @@ pub fn karaoke_scroll(caret: f32, text_width: f32, viewport: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn floating_compact_is_centered_on_a_top_taskbar() {
+        assert_eq!(super::island_gap(Some(48), 1.), 7.);
+        assert_eq!(super::island_gap(Some(54), 1.), 10.);
+        assert_eq!(super::island_gap(Some(40), 1.), 3.);
+        assert_eq!(super::island_gap(Some(48), 0.), 5.);
+        assert_eq!(super::island_gap(None, 1.), 5.);
+    }
+
+    #[test]
+    fn island_has_four_round_corners_and_morph_stays_in_bounds() {
+        for (w, h, p, r) in [
+            (270., super::COMPACT_HEIGHT, 1. - 9. / 14., 37.),
+            (591., 101., 1., 37.),
+            (680., 280., 1., 32.),
+        ] {
+            let island = super::contour_styled(w, h, p, r, 1.);
+            let radius = super::island_corner_radius(w, h, r);
+            assert_eq!(island[0], (radius, 0.));
+            assert_eq!(island[1], (w - radius, 0.));
+            assert!(
+                island
+                    .iter()
+                    .any(|&(x, y)| (x - w).abs() < 0.001 && (y - radius).abs() < 0.001)
+            );
+            for step in 0..=20 {
+                let points = super::contour_styled(w, h, p, r, step as f32 / 20.);
+                assert!(
+                    points.iter().all(|&(x, y)| x >= -0.001
+                        && x <= w + 0.001
+                        && y >= -0.001
+                        && y <= h + 0.001)
+                );
+            }
+            assert_eq!(
+                super::contour_styled(w, h, p, r, 0.),
+                super::contour(w, h, p, r)
+            );
+        }
+    }
     #[test]
     fn karaoke_scroll_follows_the_sung_glyph_and_resets_on_seek() {
         assert_eq!(super::karaoke_scroll(0., 600., 175.), 0.);

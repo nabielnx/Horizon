@@ -15,7 +15,7 @@ impl Window {
                 if state.status == "Berkas tidak tersedia" {
                     ""
                 } else {
-                    "Berkas"
+                    i18n::tr("Berkas")
                 },
                 if narrow && self.shelf_detail && count > 0 {
                     116.
@@ -30,11 +30,11 @@ impl Window {
             );
             let error = state.status == "Berkas tidak tersedia";
             let badge = if error {
-                "Berkas tidak tersedia".into()
+                i18n::tr("Berkas tidak tersedia").into()
             } else if count == 0 {
                 "Staging Ready".into()
             } else {
-                format!("{} berkas", count)
+                i18n::format!("{} berkas", "{} files", count)
             };
             let badge_w = if error {
                 122.
@@ -68,7 +68,15 @@ impl Window {
                     6.,
                     motion::mix(0x1b222a, 0x333a43, light),
                 );
-                c.center("Kosongkan", clear_x as f32, 39., 78., 9.5, true, 0xbac4ce);
+                c.center(
+                    i18n::tr("Kosongkan"),
+                    clear_x as f32,
+                    39.,
+                    78.,
+                    9.5,
+                    true,
+                    0xbac4ce,
+                );
                 self.hit(clear_x, 33, 78, 24, Action::ClearShelfFiles);
             }
             if count == 0 {
@@ -88,7 +96,7 @@ impl Window {
                 );
                 c.rect(mid - 25., 122., 50., 27., 6., 0xe9b959);
                 c.line((mid - 18., 125.), (mid + 17., 125.), 1., 0xffdf9f);
-                c.center("Drop berkas", x, 167., cw, 13., true, INK);
+                c.center(i18n::tr("Drop berkas"), x, 167., cw, 13., true, INK);
                 let chips = ["IMG", "DOC", "PDF", "ZIP", "CODE"];
                 let start = x + (cw - 230.) / 2.;
                 for (i, label) in chips.iter().enumerate() {
@@ -100,16 +108,31 @@ impl Window {
             }
             let show_list = !narrow || !self.shelf_detail;
             let left_w = if narrow { cw } else { (cw * 0.44).min(206.) };
+            let files = &state.data.shelf_files;
+            let index = self.shelf_selected.min(count - 1);
+            let file = &files[index];
+            let detail = (!narrow || self.shelf_detail).then_some(file.path.as_str());
+            let can_preview = detail.is_some_and(shelf::supports_preview);
+            let preview_open = can_preview && self.shelf_preview_open;
+            let preview_path = detail.filter(|_| preview_open);
+            let rows = files
+                .iter()
+                .enumerate()
+                .skip(self.list_offset)
+                .take(4)
+                .filter(|_| show_list);
+            self.preview_worker
+                .get_or_insert_with(|| shelf::Worker::new(self.preview_notify.clone()))
+                .request(
+                    preview_path,
+                    detail.into_iter().chain(
+                        rows.clone()
+                            .map(|(_, file)| file.path.as_str())
+                            .filter(|path| Some(*path) != detail),
+                    ),
+                );
             if show_list {
-                for (row, (i, file)) in state
-                    .data
-                    .shelf_files
-                    .iter()
-                    .enumerate()
-                    .skip(self.list_offset)
-                    .take(4)
-                    .enumerate()
-                {
+                for (row, (i, file)) in rows.enumerate() {
                     let entrance = if state.data.settings.motion {
                         self.feedback
                             .filter(|(p, _)| *p == 5)
@@ -152,13 +175,23 @@ impl Window {
                         );
                     }
                     c.glass_edge(x, y, left_w, 40., 8., light);
-                    let ext = std::path::Path::new(&file.name)
-                        .extension()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("")
-                        .to_lowercase();
-                    let (icon, ink, _) = crate::ui::file_category(&ext);
-                    c.icon(icon, x + 10., y + 12., 16., ink);
+                    let native = self
+                        .preview_worker
+                        .as_ref()
+                        .and_then(|worker| worker.icon(&file.path))
+                        .is_some_and(|icon| {
+                            c.file_icon(&file.path, icon, (x + 10., y + 10., 20.))
+                                .is_ok()
+                        });
+                    if !native {
+                        let ext = std::path::Path::new(&file.name)
+                            .extension()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("")
+                            .to_lowercase();
+                        let (icon, ink, _) = crate::ui::file_category(&ext);
+                        c.icon(icon, x + 12., y + 12., 16., ink);
+                    }
                     c.text(&file.name, x + 36., y + 6., left_w - 48., 11., true, INK);
                     c.text(
                         &crate::ui::format_file_size(file.size),
@@ -199,28 +232,31 @@ impl Window {
             }
             let right_x = if narrow { x } else { x + left_w + 14. };
             let right_w = if narrow { cw } else { cw - left_w - 14. };
-            let index = self.shelf_selected.min(count - 1);
-            let file = &state.data.shelf_files[index];
             c.rect(right_x, 68., right_w, 196., 11., 0x25221c);
             c.outline(right_x, 68., right_w, 196., 11., 0x303b46);
             c.glass_edge(right_x, 68., right_w, 196., 11., 0.);
-            let p_x = right_x + 8.;
-            let p_y = 76.;
-            let p_w = right_w - 16.;
-            let p_h = 114.;
-            c.rect(p_x, p_y, p_w, p_h, 7., 0x0b1015);
-            if self.preview_worker.is_none() {
-                self.preview_worker = Some(shelf::Worker::new(self.preview_notify.clone()));
-            }
-            let preview = self
-                .preview_worker
-                .as_mut()
-                .and_then(|worker| worker.get(&file.path));
+            let side = (right_w - 112.).min(176.);
+            let p_x = right_x + 10.;
+            let p_y = 68. + (196. - side) / 2.;
+            c.rect(p_x, p_y, side, side, 8., 0x0b1015);
+            let preview = preview_path.and_then(|path| {
+                self.preview_worker
+                    .as_ref()
+                    .and_then(|worker| worker.preview(path))
+            });
             let mut drawn = false;
             match preview {
                 Some(shelf::Preview::Image(bytes)) => {
                     drawn = c
-                        .image_preview(&file.path, bytes, p_x, p_y, p_w, p_h, 7.)
+                        .image_preview(
+                            &file.path,
+                            bytes,
+                            p_x + 5.,
+                            p_y + 5.,
+                            side - 10.,
+                            side - 10.,
+                            0.,
+                        )
                         .is_ok();
                 }
                 Some(shelf::Preview::Text(text)) => {
@@ -229,7 +265,7 @@ impl Window {
                             line,
                             p_x + 8.,
                             p_y + 6. + i as f32 * 15.,
-                            p_w - 16.,
+                            side - 16.,
                             9.,
                             false,
                             0xaebdc9,
@@ -245,37 +281,93 @@ impl Window {
                     .and_then(|s| s.to_str())
                     .unwrap_or("")
                     .to_lowercase();
-                let (icon, ink, label) = crate::ui::file_category(&ext);
-                c.icon(icon, p_x + p_w / 2. - 10., p_y + 12., 20., ink);
+                let (icon, _, label) = crate::ui::file_category(&ext);
+                let size = (side * 0.45).min(72.);
+                let icon_x = p_x + (side - size) / 2.;
+                let icon_y = p_y + (side - size - 18.) / 2.;
+                let native = self
+                    .preview_worker
+                    .as_ref()
+                    .and_then(|worker| worker.icon(&file.path))
+                    .is_some_and(|image| {
+                        c.file_icon(&file.path, image, (icon_x, icon_y, size))
+                            .is_ok()
+                    });
+                if !native {
+                    c.icon_centered(icon, (icon_x, icon_y, size, size), 29.);
+                }
                 c.center(
-                    if preview.is_none() { "Memuat" } else { label },
+                    if !preview_open {
+                        label
+                    } else if preview.is_none() {
+                        i18n::tr("Memuat")
+                    } else {
+                        i18n::tr("Preview gagal")
+                    },
                     p_x,
-                    p_y + 43.,
-                    p_w,
+                    icon_y + size + 7.,
+                    side,
                     9.,
                     false,
                     MUTED,
                 );
             }
-            c.text(
-                &file.name,
-                right_x + 10.,
-                197.,
-                right_w - 80.,
-                10.5,
-                true,
-                INK,
-            );
+            let info_x = p_x + side + 10.;
+            let info_w = right_x + right_w - 10. - info_x;
+            if assistant::supports_file(std::path::Path::new(&file.path))
+                && !self.assistant.waiting()
+            {
+                self.mini_button(
+                    c,
+                    i18n::tr("Tanya AI"),
+                    (p_x + side - 76.) as i32,
+                    (p_y + side - 30.) as i32,
+                    70,
+                    24,
+                    Action::AiFromShelf(index),
+                    false,
+                    None,
+                );
+            }
+            c.design_text(&file.name, (info_x, 84., info_w, 38.), (12., 600, 3), INK);
             c.text(
                 &crate::ui::format_file_size(file.size),
-                right_x + right_w - 64.,
-                199.,
-                56.,
-                8.5,
+                info_x,
+                126.,
+                info_w,
+                9.5,
                 false,
                 MUTED,
             );
-            let start = right_x + (right_w - 4. * 38. - 3. * 6.) / 2.;
+            if can_preview {
+                self.mini_button(
+                    c,
+                    i18n::tr(if preview_open {
+                        "Tutup preview"
+                    } else {
+                        "Lihat preview"
+                    }),
+                    info_x as i32,
+                    142,
+                    info_w.min(116.) as i32,
+                    22,
+                    Action::ToggleShelfPreview(index),
+                    !preview_open,
+                    None,
+                );
+            } else {
+                let badge_w = info_w.min(116.);
+                c.rect(info_x, 142., badge_w, 22., 7., 0x191f26);
+                c.center(
+                    i18n::tr("Ikon saja"),
+                    info_x,
+                    147.,
+                    badge_w,
+                    10.,
+                    false,
+                    MUTED,
+                );
+            }
             for (i, (icon, action)) in [
                 ("external-link", Action::OpenShelfFile(index)),
                 ("folder", Action::OpenFileFolder(index)),
@@ -288,8 +380,8 @@ impl Window {
                 self.icon_button(
                     c,
                     icon,
-                    (start + i as f32 * 44.) as i32,
-                    218,
+                    (info_x + (i % 2) as f32 * 44.) as i32,
+                    170 + (i / 2) as i32 * 44,
                     action,
                     i == 0,
                 );
