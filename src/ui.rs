@@ -9,6 +9,7 @@ impl Window {
         let shared = self.shared.clone();
         let state = shared.borrow();
         let s = &state.data.settings;
+        i18n::set_language(s.language);
         unsafe {
             crate::trace("paint: begin");
             let track = state
@@ -17,14 +18,12 @@ impl Window {
                 .and_then(|m| m.snapshot.lock().ok().map(|t| t.clone()))
                 .unwrap_or_default();
             if !self.settings {
+                self.compact_activity
+                    .observe_track(&track, state.running.is_some());
+                self.compact_activity.observe_alert(state.alert.as_ref());
                 let key = format!(
-                    "{}|{}|{:?}|{}|{}|{}",
-                    track.title,
-                    track.artist,
-                    track.lyric_index(),
-                    s.show_lyrics,
-                    track.playing,
-                    track.cover_revision
+                    "{}|{}|{}|{}",
+                    track.title, track.artist, track.playing, track.cover_revision
                 );
                 if s.motion
                     && !(self.offscreen && std::env::args().any(|a| a == "--render"))
@@ -36,8 +35,9 @@ impl Window {
                     self.overlay = Some(Overlay {
                         bitmap,
                         started: Instant::now(),
-                        duration: 0.18,
+                        duration: motion::CONTENT,
                         shell: !self.expanded,
+                        direction: 0.,
                     });
                 }
                 self.lyric_key = Some(key);
@@ -53,9 +53,27 @@ impl Window {
                 && !self.settings
                 && !(self.offscreen && std::env::args().any(|a| a == "--render"));
             self.palette.retarget(colors, animate, now);
-            c.set_glass_motion(s.motion && !self.settings);
+            c.set_glass_motion(s.motion);
+            c.set_icon_scale(if self.expanded && !self.settings {
+                0.86
+            } else {
+                1.
+            });
             c.set_interaction_pressed(self.pressed);
-            c.begin_palette(self.palette.sample(now));
+            c.set_interaction_pointer(self.pointer);
+            if !self.companion_visible() {
+                self.companion.hide();
+            }
+            if !self.settings && self.alpha_shell {
+                if let Err(error) =
+                    c.begin_shell_palette(self.palette.sample(now), shell_outline(self))
+                {
+                    self.canvas = Some(c);
+                    return Err(error);
+                }
+            } else {
+                c.begin_palette(self.palette.sample(now));
+            }
             if self.settings {
                 self.draw_settings(&c, &state);
             } else {
@@ -64,7 +82,27 @@ impl Window {
             }
             if let Some(overlay) = &self.overlay {
                 let t = (overlay.started.elapsed().as_secs_f32() / overlay.duration).clamp(0., 1.);
-                c.overlay(&overlay.bitmap, 1. - motion::ease(t), overlay.shell);
+                let progress = motion::ease(t);
+                c.overlay(
+                    &overlay.bitmap,
+                    1. - progress,
+                    overlay.shell,
+                    overlay.direction * 12. * progress,
+                    if self.settings { 190. } else { 62. },
+                );
+            }
+            if !self.settings
+                && (self.expanded || self.mode == shell_policy::Mode::Peek)
+                && let Some(notice) = &self.power_notice
+            {
+                let x = (s.width as f32 - 240.) / 2.;
+                c.rect(x, 1., 240., 18., 8., 0x202823);
+                c.design_text(
+                    &notice.text(),
+                    (x + 5., 1., 230., 18.),
+                    (10., 600, 1),
+                    0xffffff,
+                );
             }
             if let Some(h) = self.focused.and_then(|i| self.hits.get(i)) {
                 c.outline(
@@ -76,6 +114,11 @@ impl Window {
                     0xcbd4dc,
                 );
             }
+            c.finish_shell_clip();
+            if self.show_monitor_badges() {
+                self.monitor
+                    .draw_badges(&c, monitor::Badges::new(shell_outline(self)));
+            }
             let result = c.end();
             self.canvas = Some(c);
             result
@@ -86,52 +129,9 @@ impl Window {
     }
     #[expect(
         clippy::too_many_arguments,
-        reason = "Buttons carry bounds, action and semantic accent"
-    )]
-    unsafe fn button(
-        &mut self,
-        c: &Canvas,
-        label: &str,
-        x: i32,
-        y: i32,
-        w: i32,
-        action: Action,
-        primary: bool,
-        accent: Option<u32>,
-    ) {
-        unsafe {
-            let hover = self.pointer.0 >= x
-                && self.pointer.0 < x + w
-                && self.pointer.1 >= y
-                && self.pointer.1 < y + 36;
-            let draw_y = y;
-            let offset = c.control_glass(
-                x as f32,
-                draw_y as f32,
-                w as f32,
-                36.,
-                9.,
-                accent.or_else(|| (!self.settings).then(|| page_accent(self.page))),
-                hover,
-                primary,
-            );
-            c.center(
-                label,
-                x as f32,
-                draw_y as f32 + 8.5 + offset,
-                w as f32,
-                11.5,
-                true,
-                if primary || hover { 0xffffff } else { 0xe2e8f0 },
-            );
-            self.hit(x, y, w, 36, action);
-        }
-    }
-    #[expect(
-        clippy::too_many_arguments,
         reason = "Mini buttons carry bounds, custom height, action and accent"
     )]
-    unsafe fn mini_button(
+    pub(super) unsafe fn mini_button(
         &mut self,
         c: &Canvas,
         label: &str,
@@ -223,626 +223,6 @@ impl Window {
             self.hit(x, y, 38, 38, action);
         }
     }
-    unsafe fn step_button(
-        &mut self,
-        c: &Canvas,
-        icon: &'static str,
-        x: i32,
-        y: i32,
-        action: Action,
-    ) {
-        unsafe {
-            let size = 32;
-            let hover = self.pointer.0 >= x
-                && self.pointer.0 < x + size
-                && self.pointer.1 >= y
-                && self.pointer.1 < y + size;
-            let offset = c.control_glass(
-                x as f32,
-                y as f32,
-                size as f32,
-                size as f32,
-                8.,
-                None,
-                hover,
-                false,
-            );
-            c.icon(
-                icon,
-                x as f32 + 8.,
-                y as f32 + 8. + offset,
-                16.,
-                if hover { 0xffffff } else { 0xcbd5e1 },
-            );
-            self.hit(x, y, size, size, action);
-        }
-    }
-    unsafe fn row(&mut self, c: &Canvas, label: &str, value: &str, key: usize, step: i32, y: i32) {
-        unsafe {
-            c.rect(230., y as f32, 444., 50., 10., 0x131518);
-            c.outline(230., y as f32, 444., 50., 10., 0x22262c);
-            c.text(label, 246., y as f32 + 9., 280., 13., true, INK);
-            c.text(value, 246., y as f32 + 27., 280., 11., false, 0x8b949e);
-            self.step_button(c, "minus", 588, y + 9, Action::Setting(key, -step));
-            self.step_button(c, "plus", 628, y + 9, Action::Setting(key, step));
-        }
-    }
-    unsafe fn toggle_row(
-        &mut self,
-        c: &Canvas,
-        title: &str,
-        detail: &str,
-        key: usize,
-        on: bool,
-        y: i32,
-    ) {
-        unsafe {
-            let hover = self.pointer.0 >= 230
-                && self.pointer.0 < 230 + 444
-                && self.pointer.1 >= y
-                && self.pointer.1 < y + 50;
-            let bg = if hover { 0x171a1e } else { 0x131518 };
-            let border = if hover { 0x2c323a } else { 0x22262c };
-            c.rect(230., y as f32, 444., 50., 10., bg);
-            c.outline(230., y as f32, 444., 50., 10., border);
-            c.text(title, 246., y as f32 + 9., 340., 13., true, INK);
-            c.text(detail, 246., y as f32 + 27., 340., 11., false, 0x8b949e);
-            c.toggle(620., y as f32 + 13., on);
-            self.hit(230, y, 444, 50, Action::Setting(key, 1));
-        }
-    }
-    unsafe fn draw_settings(&mut self, c: &Canvas, state: &Shared) {
-        unsafe {
-            let s = &state.data.settings;
-            // Stealth deep black backdrop
-            c.rect(0., 0., 710., 550., 0., 0x090a0c);
-            c.rect(0., 0., 190., 550., 0., 0x0e1013);
-            c.rect(189., 0., 1., 550., 0., 0x1c1f24);
-
-            // Brand header
-            c.icon("sparkles", 24., 28., 18., 0xffffff);
-            c.text("Horizon", 48., 26., 120., 20., true, 0xffffff);
-            c.text("PENGATURAN", 24., 62., 146., 9.5, true, 0x6e7681);
-
-            for (i, (label, _icon)) in [
-                ("Tampilan", "sparkles"),
-                ("Perilaku", "sliders-horizontal"),
-                ("Fokus", "timer"),
-                ("Minum air", "droplet"),
-                ("Musik", "music-2"),
-                ("Notifikasi", "bell"),
-                ("Tentang", "info"),
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                let y = 104 + i as i32 * 46;
-                let selected = self.page == i;
-                let hover = self.pointer.0 >= 14
-                    && self.pointer.0 < 14 + 162
-                    && self.pointer.1 >= y
-                    && self.pointer.1 < y + 38;
-                if selected || hover {
-                    c.control_glass(14., y as f32, 162., 38., 8., None, hover, selected);
-                }
-                if selected {
-                    c.rect(14., y as f32 + 9., 3., 20., 1.5, 0xffffff);
-                }
-                settings_icons::draw(c, i, 23., y as f32 + 5., 28.);
-                c.text(
-                    label,
-                    56.,
-                    y as f32 + 10.,
-                    114.,
-                    12.,
-                    selected,
-                    if selected {
-                        0xffffff
-                    } else if hover {
-                        0xf1f5f9
-                    } else {
-                        0x8a94a0
-                    },
-                );
-                self.hit(14, y, 162, 38, Action::Page(i));
-            }
-            let (title, subtitle) = match self.page {
-                0 => ("Tampilan", "Ukuran, warna, dan material."),
-                1 => (
-                    "Perilaku",
-                    "Atur animasi transisi dan integrasi Horizon pada Windows.",
-                ),
-                2 => (
-                    "Fokus",
-                    "Sesi kerja terarah dengan timer pengingat yang tenang.",
-                ),
-                3 => (
-                    "Minum air",
-                    "Pengingat hidrasi teratur untuk menjaga ritme hari Anda.",
-                ),
-                4 => (
-                    "Musik",
-                    "Tampilan lirik sinkron dan adaptasi warna dinamis album.",
-                ),
-                5 => (
-                    "Notifikasi",
-                    "Kustomisasi peringatan audio dan jeda waktu pengingat.",
-                ),
-                _ => (
-                    "Tentang Horizon",
-                    "Ruang ringkas di atas layar untuk hari yang lebih tenang.",
-                ),
-            };
-            c.text(title, 230., 26., 380., 24., true, 0xffffff);
-            settings_icons::draw(c, self.page, 638., 23., 36.);
-            c.text(subtitle, 230., 56., 444., 11.5, false, 0x8b949e);
-            match self.page {
-                0 => {
-                    let names = ["Dark titanium", "Forest graphite", "Warm graphite"];
-                    let colors = render::palette(s.theme);
-                    // Preview Card
-                    c.rect(230., 90., 444., 86., 12., 0x131518);
-                    c.outline(230., 90., 444., 86., 12., 0x22262c);
-                    // Miniature notch preview in center of preview card
-                    let notch_w = 260. * (s.width as f32 / 700.).clamp(0.6, 1.0);
-                    let notch_h = 42.;
-                    let notch_x = 230. + (444. - notch_w) / 2.;
-                    c.rect(
-                        notch_x,
-                        90.,
-                        notch_w,
-                        notch_h,
-                        (s.radius as f32 * 0.4).min(14.),
-                        colors[1],
-                    );
-                    c.outline(
-                        notch_x,
-                        90.,
-                        notch_w,
-                        notch_h,
-                        (s.radius as f32 * 0.4).min(14.),
-                        0x333942,
-                    );
-                    // Inside mini notch: mini clock and mini droplet/wave
-                    c.icon("clock", notch_x + 16., 104., 14., 0xffffff);
-                    c.text("18:30", notch_x + 36., 104., 40., 11., true, 0xffffff);
-                    c.icon("music-2", notch_x + notch_w - 30., 104., 14., 0xffffff);
-                    // Card description
-                    c.center(
-                        &format!(
-                            "{} · {} px · {}% opasitas",
-                            names[s.theme],
-                            s.width,
-                            (s.opacity as f32 / 255. * 100.).round() as u32
-                        ),
-                        230.,
-                        148.,
-                        444.,
-                        11.,
-                        false,
-                        0x8b949e,
-                    );
-
-                    self.row(c, "Lebar panel", &format!("{} px", s.width), 0, 20, 190);
-                    self.row(
-                        c,
-                        "Opasitas panel",
-                        &format!("{}%", (s.opacity as f32 / 255. * 100.).round() as u32),
-                        1,
-                        13,
-                        248,
-                    );
-                    self.row(c, "Lengkung sudut", &format!("{} px", s.radius), 2, 2, 306);
-
-                    // Theme selector header
-                    c.text("Palet dasar tema", 230., 372., 200., 12., true, INK);
-                    // 3 Theme cards side-by-side
-                    let theme_data = [
-                        ("Titanium", 0x7e8a94),
-                        ("Forest", 0x6c8a80),
-                        ("Warm", 0x9a8272),
-                    ];
-                    for (i, (name, dot_color)) in theme_data.into_iter().enumerate() {
-                        let tx = 230 + i as i32 * 152;
-                        let selected = s.theme == i;
-                        let hover = self.pointer.0 >= tx
-                            && self.pointer.0 < tx + 140
-                            && self.pointer.1 >= 396
-                            && self.pointer.1 < 396 + 46;
-                        let bg = if selected {
-                            0x1c2026
-                        } else if hover {
-                            0x16181c
-                        } else {
-                            0x131518
-                        };
-                        let border = if selected {
-                            0xffffff
-                        } else if hover {
-                            0x323842
-                        } else {
-                            0x22262c
-                        };
-                        c.rect(tx as f32, 396., 140., 46., 10., bg);
-                        c.outline(tx as f32, 396., 140., 46., 10., border);
-                        // Swatch dot
-                        c.rect(tx as f32 + 14., 409., 20., 20., 6., dot_color);
-                        if selected {
-                            c.outline(tx as f32 + 14., 409., 20., 20., 6., 0xffffff);
-                        }
-                        c.text(
-                            name,
-                            tx as f32 + 42.,
-                            411.,
-                            80.,
-                            12.,
-                            selected,
-                            if selected { 0xffffff } else { 0x94a3b8 },
-                        );
-                        self.hit(
-                            tx,
-                            396,
-                            140,
-                            46,
-                            Action::Setting(3, i as i32 - s.theme as i32),
-                        );
-                    }
-                }
-                1 => {
-                    self.toggle_row(
-                        c,
-                        "Animasi antarmode",
-                        "Transisi ukuran dan posisi notch bergerak secara halus.",
-                        4,
-                        s.motion,
-                        110,
-                    );
-                    self.toggle_row(
-                        c,
-                        "Jalankan saat Windows masuk",
-                        "Buka Horizon secara otomatis setelah pengguna masuk.",
-                        5,
-                        s.startup,
-                        174,
-                    );
-                    // Shortcuts card
-                    c.rect(230., 248., 444., 140., 12., 0x131518);
-                    c.outline(230., 248., 444., 140., 12., 0x22262c);
-                    c.text(
-                        "Pintasan Keyboard & Mouse",
-                        246.,
-                        264.,
-                        380.,
-                        12.5,
-                        true,
-                        INK,
-                    );
-
-                    // Shortcut 1: Ctrl + Alt + H
-                    c.rect(246., 296., 38., 22., 5., 0x1c2025);
-                    c.outline(246., 296., 38., 22., 5., 0x323842);
-                    c.center("Ctrl", 246., 301., 38., 10.5, true, 0xffffff);
-
-                    c.text("+", 290., 300., 12., 12., false, 0x6e7681);
-
-                    c.rect(304., 296., 36., 22., 5., 0x1c2025);
-                    c.outline(304., 296., 36., 22., 5., 0x323842);
-                    c.center("Alt", 304., 301., 36., 10.5, true, 0xffffff);
-
-                    c.text("+", 346., 300., 12., 12., false, 0x6e7681);
-
-                    c.rect(360., 296., 26., 22., 5., 0x1c2025);
-                    c.outline(360., 296., 26., 22., 5., 0x323842);
-                    c.center("H", 360., 301., 26., 10.5, true, 0xffffff);
-
-                    c.text(
-                        "Buka / ringkas notch",
-                        402.,
-                        299.,
-                        250.,
-                        11.5,
-                        false,
-                        0xcbd5e1,
-                    );
-
-                    // Divider inside card
-                    c.rect(246., 334., 412., 1., 0., 0x1c1f24);
-
-                    // Shortcut 2: Klik kanan notch
-                    c.rect(246., 348., 120., 22., 5., 0x1c2025);
-                    c.outline(246., 348., 120., 22., 5., 0x323842);
-                    c.center("Klik kanan notch", 246., 353., 120., 10.5, true, 0xffffff);
-
-                    c.text(
-                        "Buka jendela pengaturan",
-                        382.,
-                        351.,
-                        260.,
-                        11.5,
-                        false,
-                        0xcbd5e1,
-                    );
-                }
-                2 => {
-                    self.row(
-                        c,
-                        "Durasi sesi",
-                        &format!("{} menit", s.focus_minutes),
-                        6,
-                        5,
-                        110,
-                    );
-                    c.text("Pilihan durasi cepat", 230., 178., 400., 12., true, INK);
-                    for (i, minutes) in [5, 15, 25, 50].into_iter().enumerate() {
-                        let bx = 230 + i as i32 * 114;
-                        let active = s.focus_minutes as i32 == minutes;
-                        self.button(
-                            c,
-                            &format!("{minutes} menit"),
-                            bx,
-                            202,
-                            102,
-                            Action::Setting(6, minutes - s.focus_minutes as i32),
-                            active,
-                            if active { Some(0xfa5f5f) } else { None },
-                        );
-                    }
-                    // Current Timer Card
-                    c.rect(230., 262., 444., 116., 12., 0x131518);
-                    c.outline(230., 262., 444., 116., 12., 0x22262c);
-                    let left = remaining(state);
-                    c.icon("timer", 250., 282., 20., 0xffffff);
-                    c.text("Timer saat ini", 278., 283., 340., 11.5, false, 0x8b949e);
-                    c.text(
-                        &format!("{:02}:{:02}", left / 60, left % 60),
-                        250.,
-                        314.,
-                        360.,
-                        34.,
-                        true,
-                        0xffffff,
-                    );
-                    c.text(
-                        "Perubahan durasi tetap mempertahankan sisa waktu yang sedang berjalan.",
-                        230.,
-                        398.,
-                        444.,
-                        10.5,
-                        false,
-                        0x6e7681,
-                    );
-                }
-                3 => {
-                    self.row(
-                        c,
-                        "Target air harian",
-                        &format!("{} ml", s.water_goal),
-                        7,
-                        250,
-                        94,
-                    );
-                    self.row(c, "Ukuran gelas", &format!("{} ml", s.cup), 8, 50, 152);
-                    self.row(
-                        c,
-                        "Interval minum",
-                        &format!("{} menit", s.water_interval),
-                        9,
-                        1,
-                        210,
-                    );
-                    self.row(
-                        c,
-                        "Mulai mengingatkan",
-                        &format!("{:02}:00", s.water_start_hour),
-                        12,
-                        1,
-                        268,
-                    );
-                    self.row(
-                        c,
-                        "Berhenti mengingatkan",
-                        &format!("{:02}:00", s.water_end_hour),
-                        13,
-                        1,
-                        326,
-                    );
-                    self.toggle_row(
-                        c,
-                        "Pengingat minum",
-                        &format!(
-                            "Aktif otomatis antara pukul {:02}:00 – {:02}:00.",
-                            s.water_start_hour, s.water_end_hour
-                        ),
-                        11,
-                        s.water_enabled,
-                        384,
-                    );
-                }
-                4 => {
-                    self.toggle_row(
-                        c,
-                        "Warna dari sampul",
-                        "Adaptasikan palet warna notch dengan artwork album lagu.",
-                        15,
-                        s.album_colors,
-                        110,
-                    );
-                    self.toggle_row(
-                        c,
-                        "Lirik sinkron",
-                        "Tampilkan lirik berjalan di notch pemutar dan saat mode idle.",
-                        16,
-                        s.show_lyrics,
-                        174,
-                    );
-                    // Info Card
-                    c.rect(230., 252., 444., 140., 12., 0x131518);
-                    c.outline(230., 252., 444., 140., 12., 0x22262c);
-                    c.icon("music-2", 248., 270., 18., 0xffffff);
-                    c.text("Integrasi Lirik & Audio", 274., 268., 360., 13., true, INK);
-                    c.text(
-                        "• Pencarian lirik menggunakan database terbuka LRCLIB.",
-                        248.,
-                        302.,
-                        400.,
-                        11.,
-                        false,
-                        0x8b949e,
-                    );
-                    c.text(
-                        "• Hanya judul lagu, artis, dan durasi yang dikirim saat sinkronisasi.",
-                        248.,
-                        326.,
-                        400.,
-                        11.,
-                        false,
-                        0x8b949e,
-                    );
-                    c.text(
-                        "• Palet dasar tema kembali aktif otomatis saat musik dihentikan.",
-                        248.,
-                        350.,
-                        400.,
-                        11.,
-                        false,
-                        0x8b949e,
-                    );
-                }
-                5 => {
-                    self.toggle_row(
-                        c,
-                        "Suara pengingat",
-                        "Bunyi audio notifikasi untuk fokus, tugas, kalender, dan hidrasi.",
-                        10,
-                        s.sound,
-                        110,
-                    );
-                    self.row(
-                        c,
-                        "Pengingat acara",
-                        &format!("{} menit sebelum acara dimulai", s.event_lead_minutes),
-                        14,
-                        1,
-                        174,
-                    );
-                    // Audio Test Card
-                    c.rect(230., 252., 444., 126., 12., 0x131518);
-                    c.outline(230., 252., 444., 126., 12., 0x22262c);
-                    c.icon("bell", 248., 270., 18., 0xffffff);
-                    c.text("Uji Coba Suara", 274., 268., 360., 13., true, INK);
-                    c.text(
-                        "Suara pengingat mengikuti volume dan perangkat audio default Windows.",
-                        248.,
-                        298.,
-                        400.,
-                        11.,
-                        false,
-                        0x8b949e,
-                    );
-                    if s.sound {
-                        self.button(
-                            c,
-                            "Putar nada uji",
-                            248,
-                            326,
-                            140,
-                            Action::TestSound,
-                            true,
-                            Some(0x818cf8),
-                        );
-                    } else {
-                        c.rect(248., 326., 140., 32., 8., 0x181a1e);
-                        c.outline(248., 326., 140., 32., 8., 0x282c33);
-                        c.center(
-                            "Suara dinonaktifkan",
-                            248.,
-                            334.,
-                            140.,
-                            11.,
-                            false,
-                            0x6e7681,
-                        );
-                    }
-                }
-                _ => {
-                    // Hero About Card
-                    c.rect(230., 96., 444., 230., 14., 0x131518);
-                    c.outline(230., 96., 444., 230., 14., 0x22262c);
-
-                    // Brand badge
-                    c.rect(252., 120., 44., 44., 12., 0x1a1d22);
-                    c.outline(252., 120., 44., 44., 12., 0x323842);
-                    c.icon("sparkles", 262., 130., 24., 0xffffff);
-
-                    c.text("Horizon", 310., 120., 200., 22., true, 0xffffff);
-                    // Version pill badge
-                    c.rect(400., 124., 58., 20., 10., 0x1a1d22);
-                    c.outline(400., 124., 58., 20., 10., 0x323842);
-                    c.center("v0.3.0", 400., 127., 58., 10.5, true, 0xe2e8f0);
-
-                    c.text(
-                        "Ruang ringkas di atas layar untuk hari yang lebih tenang.",
-                        310.,
-                        148.,
-                        340.,
-                        11.5,
-                        false,
-                        0x8b949e,
-                    );
-
-                    // Divider inside card
-                    c.rect(252., 180., 400., 1., 0., 0x1c1f24);
-
-                    // Feature / Storage bullets
-                    c.icon("check", 252., 196., 16., 0xffffff);
-                    c.text(
-                        "Pengaturan, jadwal kalender, dan catatan tersimpan lokal di PC ini.",
-                        276.,
-                        196.,
-                        370.,
-                        11.5,
-                        false,
-                        0xcbd5e1,
-                    );
-                    c.icon("check", 252., 224., 16., 0xffffff);
-                    c.text(
-                        "Desain native ultra-ringan dengan konsumsi memori dan CPU minimal.",
-                        276.,
-                        224.,
-                        370.,
-                        11.5,
-                        false,
-                        0xcbd5e1,
-                    );
-                    c.icon("check", 252., 252., 16., 0xffffff);
-                    c.text(
-                        "Bebas pelacakan analitik dan menghormati privasi pengguna.",
-                        276.,
-                        252.,
-                        370.,
-                        11.5,
-                        false,
-                        0xcbd5e1,
-                    );
-
-                    // Exit Button Card
-                    self.button(
-                        c,
-                        "Keluar dari Horizon",
-                        230,
-                        350,
-                        180,
-                        Action::Exit,
-                        false,
-                        None,
-                    );
-                }
-            }
-            // Bottom status bar
-            c.rect(230., 512., 6., 6., 3., 0x6e7681);
-            c.text(&state.status, 244., 507., 430., 11., false, 0x6e7681);
-        }
-    }
     unsafe fn draw_notch(&mut self, c: &Canvas, state: &Shared) {
         unsafe {
             if (self.page <= 2 || !self.expanded) && self.draw_figma(c, state) {
@@ -856,7 +236,7 @@ impl Window {
                 .unwrap_or_default();
             let width = s.width as f32;
             let p = self.expansion;
-            let radius = EXPANDED_RADIUS;
+            let radius = expanded_radius(s);
             let (compact_w, compact_h) = match self.mode {
                 shell_policy::Mode::Indicator => (54., 6.),
                 _ => (270., 36.),
@@ -896,7 +276,15 @@ impl Window {
                             (width - pad * 2. - 88.).max(80.)
                         };
                         c.icon(icon, pad, 28., 18., icon_color);
-                        c.text("PENGINGAT", pad + 28., 18., alert_w, 10.5, true, MUTED);
+                        c.text(
+                            i18n::tr("PENGINGAT"),
+                            pad + 28.,
+                            18.,
+                            alert_w,
+                            10.5,
+                            true,
+                            MUTED,
+                        );
                         c.text(&alert.text, pad + 28., 36., alert_w, 13., true, INK);
                         let close_x = (width - pad - 44.) as i32;
                         if alert.is_water {
@@ -1054,9 +442,9 @@ impl Window {
                         let day_idx = now.weekday().num_days_from_monday() as usize;
                         let full_date = format!(
                             "{}, {} {} {}",
-                            calendar::DAYS_FULL[day_idx],
+                            i18n::tr(calendar::DAYS_FULL[day_idx]),
                             now.day(),
-                            calendar::MONTHS[now.month0() as usize],
+                            i18n::tr(calendar::MONTHS[now.month0() as usize]),
                             now.year()
                         );
 
@@ -1072,7 +460,12 @@ impl Window {
                                 MUTED,
                             );
                             let n = remaining(state);
-                            let label = format!("{:02}:{:02} · Sesi fokus", n / 60, n % 60);
+                            let label = i18n::format!(
+                                "{:02}:{:02} · Sesi fokus",
+                                "{:02}:{:02} · Focus session",
+                                n / 60,
+                                n % 60
+                            );
                             c.text(
                                 &label,
                                 pad + 28.,
@@ -1112,7 +505,12 @@ impl Window {
                             // Card 1: To-Do Glance
                             c.icon("list-checks", glance_x, 18., 13., 0x5ffa88);
                             c.text(
-                                &format!("Tugas · {}/{} selesai", done_tasks, total_tasks),
+                                &i18n::format!(
+                                    "Tugas · {}/{} selesai",
+                                    "Tasks · {}/{} completed",
+                                    done_tasks,
+                                    total_tasks
+                                ),
                                 glance_x + 18.,
                                 17.,
                                 col_w - 18.,
@@ -1131,7 +529,12 @@ impl Window {
                                 (state.data.water as f32 / s.water_goal as f32).clamp(0., 1.);
                             c.icon("droplet", card2_x, 18., 13., 0x5fe0fa);
                             c.text(
-                                &format!("Air · {}/{} ml", state.data.water, s.water_goal),
+                                &i18n::format!(
+                                    "Air · {}/{} ml",
+                                    "Water · {}/{} ml",
+                                    state.data.water,
+                                    s.water_goal
+                                ),
                                 card2_x + 18.,
                                 17.,
                                 col_w - 18.,
@@ -1174,7 +577,12 @@ impl Window {
                             } else if !track.title.is_empty() {
                                 c.icon("music-2", glance_x, 44., 11., 0x8a97a4);
                                 c.text(
-                                    &format!("Jeda: {} · {}", track.title, track.artist),
+                                    &i18n::format!(
+                                        "Jeda: {} · {}",
+                                        "Paused: {} · {}",
+                                        track.title,
+                                        track.artist
+                                    ),
                                     glance_x + 16.,
                                     43.,
                                     content_w - 16.,
@@ -1185,8 +593,9 @@ impl Window {
                             } else if !state.data.shelf_files.is_empty() {
                                 c.icon("folder", glance_x, 44., 11., 0xfbbf24);
                                 c.text(
-                                    &format!(
+                                    &i18n::format!(
                                         "Rak Berkas: {} file diparkir",
+                                        "File shelf: {} files parked",
                                         state.data.shelf_files.len()
                                     ),
                                     glance_x + 16.,
@@ -1198,7 +607,7 @@ impl Window {
                                 );
                             } else {
                                 c.text(
-                                    "Klik bar untuk membuka panel kontrol penuh",
+                                    i18n::tr("Klik bar untuk membuka panel kontrol penuh"),
                                     glance_x,
                                     43.,
                                     content_w,
@@ -1274,7 +683,7 @@ impl Window {
                             c.lyric_scroll(&curr.text, left + 47., 6., 196., 13., true, INK, p);
                         } else {
                             let text = if track.title.is_empty() {
-                                "Tidak ada musik"
+                                i18n::tr("Tidak ada musik")
                             } else {
                                 &track.title
                             };
@@ -1310,9 +719,9 @@ impl Window {
                         let day_idx = now.weekday().num_days_from_monday() as usize;
                         let short_date = format!(
                             "{}, {} {}",
-                            calendar::DAYS_SHORT[day_idx],
+                            i18n::tr(calendar::DAYS_SHORT[day_idx]),
                             now.day(),
-                            calendar::MONTHS_SHORT[now.month0() as usize]
+                            i18n::tr(calendar::MONTHS_SHORT[now.month0() as usize])
                         );
                         let time_w = c.measure_text(&time_str, 12., true);
                         let date_w = c.measure_text(&short_date, 12., false);
@@ -1365,7 +774,8 @@ impl Window {
                 }
                 if state.running.is_some() {
                     let n = remaining(state);
-                    let label = format!("{:02}:{:02} · Fokus", n / 60, n % 60);
+                    let label =
+                        i18n::format!("{:02}:{:02} · Fokus", "{:02}:{:02} · Focus", n / 60, n % 60);
                     let left = (width - 270.) / 2.;
                     c.icon("timer", left + 25., 10., 14., MUTED);
                     c.center(&label, left + 45., 8., 200., 13., true, INK);
@@ -1377,9 +787,9 @@ impl Window {
                 let day_idx = now.weekday().num_days_from_monday() as usize;
                 let short_date = format!(
                     "{}, {} {}",
-                    calendar::DAYS_SHORT[day_idx],
+                    i18n::tr(calendar::DAYS_SHORT[day_idx]),
                     now.day(),
-                    calendar::MONTHS_SHORT[now.month0() as usize]
+                    i18n::tr(calendar::MONTHS_SHORT[now.month0() as usize])
                 );
                 let left = (width - 270.) / 2.;
                 let time_w = c.measure_text(&time_str, 12., true);
@@ -1428,7 +838,7 @@ impl Window {
                     0x8a97a4,
                 );
             }
-            self.figma_sidebar(c);
+            self.figma_sidebar(c, &track);
             match self.page {
                 0 => {
                     let track = state
@@ -1471,7 +881,7 @@ impl Window {
                         let info_x = cover_x + cover_size + 12.;
                         let info_w = player_w - cover_size - 12.;
                         let title = if track.title.is_empty() {
-                            "Tidak ada musik"
+                            i18n::tr("Tidak ada musik")
                         } else {
                             &track.title
                         };
@@ -1484,7 +894,7 @@ impl Window {
                         c.marquee_left(title, info_x, 36., info_w, 14.5, true, INK, elapsed);
                         c.text(
                             if track.artist.is_empty() {
-                                "Putar di Spotify / browser"
+                                i18n::tr("Putar di Spotify / browser")
                             } else {
                                 &track.artist
                             },
@@ -1497,7 +907,7 @@ impl Window {
                         );
                         c.icon("headphones", info_x, 80., 11., MUTED);
                         c.text(
-                            "Media Windows",
+                            i18n::tr("Media Windows"),
                             info_x + 16.,
                             78.,
                             info_w - 16.,
@@ -1613,7 +1023,7 @@ impl Window {
                             if track.lyrics.is_empty() {
                                 c.text(
                                     if track.title.is_empty() {
-                                        "Tidak ada musik"
+                                        i18n::tr("Tidak ada musik")
                                     } else {
                                         &track.title
                                     },
@@ -1624,14 +1034,7 @@ impl Window {
                                     true,
                                     INK,
                                 );
-                                let status_text =
-                                    if !track.lyrics_loaded && track.lyrics_retry.is_some() {
-                                        "Menunggu layanan lirik"
-                                    } else if !track.lyrics_loaded {
-                                        "Mencari lirik"
-                                    } else {
-                                        "Lirik belum tersedia"
-                                    };
+                                let status_text = track.lyrics_message();
                                 c.text(
                                     status_text,
                                     lyrics_x,
@@ -1733,7 +1136,7 @@ impl Window {
                         } else {
                             c.text(
                                 if track.title.is_empty() {
-                                    "Tidak ada musik"
+                                    i18n::tr("Tidak ada musik")
                                 } else {
                                     &track.title
                                 },
@@ -1745,7 +1148,7 @@ impl Window {
                                 INK,
                             );
                             c.text(
-                                "Lirik nonaktif",
+                                i18n::tr("Lirik nonaktif"),
                                 lyrics_x,
                                 116.,
                                 lyrics_w,
@@ -1763,6 +1166,8 @@ impl Window {
                 3 => self.draw_water(c, state),
                 4 => self.draw_tasks(c, state),
                 5 => self.draw_shelf(c, state),
+                assistant::PAGE => self.draw_assistant(c, s.width),
+                monitor::PAGE => self.draw_monitor(c, s),
                 _ => {}
             }
         }
@@ -1815,7 +1220,7 @@ impl Window {
 
             if remaining_ml > 0 {
                 c.text(
-                    "SISA AIR",
+                    i18n::tr("SISA AIR"),
                     info_x,
                     bottle_y + 2.,
                     info_w,
@@ -1833,7 +1238,7 @@ impl Window {
                     true,
                     0xffffff,
                 );
-                let pct_str = format!("{}% tersisa", pct_left);
+                let pct_str = i18n::format!("{}% tersisa", "{}% remaining", pct_left);
                 c.text(
                     &pct_str,
                     info_x,
@@ -1846,7 +1251,7 @@ impl Window {
             } else {
                 c.text("STATUS", info_x, bottle_y + 2., info_w, 9.0, true, 0x8294a5);
                 c.text(
-                    "HABIS",
+                    i18n::tr("HABIS"),
                     info_x,
                     bottle_y + 14.,
                     info_w,
@@ -1855,7 +1260,7 @@ impl Window {
                     0x5ffa88,
                 );
                 c.text(
-                    "Target tercapai",
+                    i18n::tr("Target tercapai"),
                     info_x,
                     bottle_y + 34.,
                     info_w,
@@ -1937,10 +1342,10 @@ impl Window {
             let right_x = divider_x + 18.;
             let right_w = (x + cw - 18. - right_x).max(120.);
 
-            // Header: Droplet Icon + "HIDRASI"
+            // Header: Droplet Icon + i18n::tr("HIDRASI")
             c.icon("droplet", right_x, card_y + 14., 14., 0x3de8ff);
             c.text(
-                "HIDRASI",
+                i18n::tr("HIDRASI"),
                 right_x + 20.,
                 card_y + 14.,
                 120.,
@@ -1962,7 +1367,12 @@ impl Window {
             );
             let pct_drunk =
                 ((state.data.water as f32 / s.water_goal as f32).min(1.0) * 100.).round() as u32;
-            let sub_str = format!("{}% diminum · Target {} ml", pct_drunk, s.water_goal);
+            let sub_str = i18n::format!(
+                "{}% diminum · Target {} ml",
+                "{}% consumed · Goal {} ml",
+                pct_drunk,
+                s.water_goal
+            );
             c.text(
                 &sub_str,
                 right_x,
@@ -2096,7 +1506,8 @@ impl Window {
             let draw_prim_y = prim_y;
 
             let cup_amount = s.cup.max(100);
-            let drink_label = format!("- Minum Air (-{} ml)", cup_amount);
+            let drink_label =
+                i18n::format!("- Minum Air (-{} ml)", "- Drink water (-{} ml)", cup_amount);
 
             let offset = c.control_glass(
                 prim_x as f32,
@@ -2141,22 +1552,23 @@ pub(super) fn format_file_size(bytes: u64) -> String {
 pub(super) fn file_category(ext: &str) -> (&'static str, u32, &'static str) {
     match ext {
         "png" | "jpg" | "jpeg" | "webp" | "bmp" | "ico" | "gif" | "svg" => {
-            ("sparkles", 0xfbbf24, "Gambar")
+            ("sparkles", 0xfbbf24, i18n::tr("Gambar"))
         }
         "txt" | "md" | "rs" | "json" | "log" | "py" | "js" | "ts" | "toml" | "yaml" | "yml"
-        | "html" | "css" | "c" | "cpp" | "sql" => ("file-text", 0x818cf8, "Dokumen/Kode"),
+        | "html" | "css" | "c" | "cpp" | "sql" => ("file-text", 0x818cf8, i18n::tr("Dokumen/Kode")),
         "pdf" | "doc" | "docx" | "ppt" | "pptx" | "xls" | "xlsx" => {
-            ("file-text", 0xfb7185, "Dokumen")
+            ("file-text", 0xfb7185, i18n::tr("Dokumen"))
         }
-        "zip" | "rar" | "7z" | "tar" | "gz" => ("folder", 0x34d399, "Arsip"),
+        "zip" | "rar" | "7z" | "tar" | "gz" => ("folder", 0x34d399, i18n::tr("Arsip")),
         "mp3" | "flac" | "wav" | "m4a" | "ogg" => ("music-2", 0xa78bfa, "Audio"),
         "mp4" | "mkv" | "mov" | "avi" => ("play", 0x38bdf8, "Video"),
-        _ => ("folder", 0x94a3b8, "Berkas"),
+        _ => ("folder", 0x94a3b8, i18n::tr("Berkas")),
     }
 }
 
-fn page_accent(page: usize) -> u32 {
+pub(super) fn page_accent(page: usize) -> u32 {
     match page {
+        monitor::PAGE => monitor::CPU_COLOR,
         1 => 0xfa5f5f,
         2 => 0x818cf8,
         3 => 0x5fe0fa,

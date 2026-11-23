@@ -15,19 +15,27 @@ impl Window {
                 (width - 62) as f32,
                 (panel_height(&state.data.settings) - 24) as f32,
                 0.,
-                0x090e0b,
+                0x0d0f12,
             );
-            c.text("Tugas", x, 32., 100., 16., true, 0xf1f5f2);
+            c.text(i18n::tr("Tugas"), x, 32., 100., 16., true, 0xf1f5f2);
             c.ellipse(
-                x + c.measure_text("Tugas", 16., true) + 7.,
+                x + c.measure_text(i18n::tr("Tugas"), 16., true) + 7.,
                 40.,
                 4.,
                 4.,
                 render::TASK_ACCENT,
             );
             if total == 0 {
-                c.rect(x, 64., lw, list.height as f32, 10., 0x17271d);
-                c.center("Belum ada tugas", x, 133., lw, 11., false, 0x99afa1);
+                c.glass_panel((x, 64., lw, list.height as f32), 10., 0x202022, 0.);
+                c.center(
+                    i18n::tr("Belum ada tugas"),
+                    x,
+                    133.,
+                    lw,
+                    11.,
+                    false,
+                    0xa8b0bd,
+                );
             }
             for (row, (index, task)) in state
                 .data
@@ -44,12 +52,16 @@ impl Window {
                     && self.pointer.1 >= y as i32
                     && self.pointer.1 < y as i32 + 36;
                 let light = c.hover_amount((x, y, lw, 36.), hover);
-                c.rect(x, y, lw, 36., 10., motion::mix(0x18231e, 0x2b4033, light));
-                c.glass_edge(x, y, lw, 36., 10., light);
+                c.glass_panel(
+                    (x, y, lw, 36.),
+                    10.,
+                    motion::mix(0x202022, 0x303033, light),
+                    light,
+                );
                 let check_x = x + 11.;
                 let completion =
                     c.animate_value((x, y, lw, 36.), 3, f32::from(task.done), motion::STATE);
-                c.outline(check_x, y + 9.5, 17., 17., 8.5, 0x60776a);
+                c.outline(check_x, y + 9.5, 17., 17., 8.5, 0x69727f);
                 if completion > 0.001 {
                     let size = 17. * completion;
                     let inset = (17. - size) / 2.;
@@ -100,7 +112,7 @@ impl Window {
                     text_w,
                     11.5,
                     !task.done,
-                    motion::mix(0xf1f5f2, 0x899a92, completion),
+                    motion::mix(0xf1f3f7, 0x98a1ae, completion),
                 );
                 if completion > 0.001 {
                     c.line(
@@ -111,7 +123,7 @@ impl Window {
                             y + 18.,
                         ),
                         1.,
-                        0x71877b,
+                        0x7e8794,
                     );
                 }
                 if let Some(due) = due {
@@ -122,11 +134,11 @@ impl Window {
                         37.,
                         9.5,
                         false,
-                        0x91a89b,
+                        0x9aa4b1,
                     );
                 }
                 let (_, ink) = task_priority(task.priority);
-                c.ellipse(x + lw - 42., y + 12.5, 11., 11., 0x0b1d12);
+                c.ellipse(x + lw - 42., y + 12.5, 11., 11., 0x14161a);
                 c.ellipse(x + lw - 40., y + 14.5, 7., 7., ink);
                 let remove_x = list.x + list.width - 26;
                 let delete_hover = hover && self.pointer.0 >= remove_x;
@@ -140,8 +152,8 @@ impl Window {
                         28.,
                         6.,
                         motion::mix(
-                            motion::mix(0x18231e, 0x2b4033, light),
-                            0x2b4935,
+                            motion::mix(0x202022, 0x303033, light),
+                            0x41444b,
                             delete_light,
                         ),
                     );
@@ -157,24 +169,19 @@ impl Window {
             }
             self.draw_task_progress(c, summary, done, total);
             let field = input::task_bounds(width);
-            c.rect(
-                field.x as f32,
-                field.y as f32,
-                field.width as f32,
-                field.height as f32,
+            c.glass_panel(
+                (
+                    field.x as f32,
+                    field.y as f32,
+                    field.width as f32,
+                    field.height as f32,
+                ),
                 10.,
                 input::TASK_FIELD,
-            );
-            c.outline(
-                field.x as f32,
-                field.y as f32,
-                field.width as f32,
-                field.height as f32,
-                10.,
                 if windows::Win32::UI::Input::KeyboardAndMouse::GetFocus() == self.input {
-                    0x658a70
+                    1.
                 } else {
-                    0x3d5344
+                    0.
                 },
             );
             let pill = input::priority_pill(width);
@@ -182,31 +189,16 @@ impl Window {
             let hover = pill.contains(self.pointer.0, self.pointer.1);
             let py = pill.y as f32;
             let light = c.hover_amount((pill.x as f32, py, pill.width as f32, 38.), hover);
-            c.rect(
-                pill.x as f32,
-                py,
-                pill.width as f32,
-                38.,
+            c.glass_panel(
+                (pill.x as f32, py, pill.width as f32, 38.),
                 10.,
                 motion::mix(
-                    0x213328,
-                    0x2b4233,
+                    0x202022,
+                    0x303033,
                     if self.priority_open { 1. } else { light },
                 ),
+                if self.priority_open { 1. } else { light },
             );
-            c.outline(
-                pill.x as f32,
-                py,
-                pill.width as f32,
-                38.,
-                10.,
-                if self.priority_open {
-                    0x658a70
-                } else {
-                    0x3d5344
-                },
-            );
-            c.glass_edge(pill.x as f32, py, pill.width as f32, 38., 10., light);
             c.ellipse(pill.x as f32 + 8., py + 17., 4., 4., ink);
             if pill.width >= 64 {
                 c.text(
@@ -216,7 +208,7 @@ impl Window {
                     (pill.width - 37) as f32,
                     priority_label_size(c, pill.width),
                     false,
-                    0xd3e1d8,
+                    0xdde2ea,
                 );
             }
             c.icon(
@@ -238,27 +230,7 @@ impl Window {
                 && self.pointer.0 < add_x + 38
                 && (pill.y..pill.y + pill.height).contains(&self.pointer.1);
             let add_y = pill.y as f32;
-            let offset = c.control_glass(
-                add_x as f32,
-                add_y,
-                38.,
-                38.,
-                10.,
-                Some(render::TASK_ACCENT),
-                hover,
-                false,
-            );
-            let light = c.hover_amount((add_x as f32, add_y, 38., 38.), hover);
-            if light > 0.001 {
-                c.outline(
-                    add_x as f32,
-                    add_y + offset,
-                    38.,
-                    38.,
-                    10.,
-                    motion::mix(0x31523e, render::TASK_ACCENT, light),
-                );
-            }
+            let offset = c.glass_button((add_x as f32, add_y, 38., 38.), 10., hover);
             c.icon(
                 "plus",
                 add_x as f32 + 10.,
@@ -295,21 +267,16 @@ impl Window {
                     11.,
                     0x70000000,
                 );
-                c.rect(
-                    menu.x as f32,
-                    menu.y as f32,
-                    menu.width as f32,
-                    menu.height as f32,
+                c.glass_panel(
+                    (
+                        menu.x as f32,
+                        menu.y as f32,
+                        menu.width as f32,
+                        menu.height as f32,
+                    ),
                     11.,
-                    0x192a20,
-                );
-                c.outline(
-                    menu.x as f32,
-                    menu.y as f32,
-                    menu.width as f32,
-                    menu.height as f32,
-                    11.,
-                    0x4a6853,
+                    0x202022,
+                    0.3,
                 );
                 for (i, p) in [1, 0, 2].into_iter().enumerate() {
                     let (label, ink) = task_priority(p);
@@ -331,7 +298,7 @@ impl Window {
                             menu.width as f32 - 10.,
                             32.,
                             6.,
-                            motion::mix(0x192a20, 0x2d4937, selection.max(light)),
+                            motion::mix(0x202022, 0x393d45, selection.max(light)),
                         );
                     }
                     c.ellipse(menu.x as f32 + 13., yy as f32 + 12.5, 7., 7., ink);
@@ -379,10 +346,21 @@ impl Window {
         unsafe {
             let x = bounds.x as f32;
             let w = bounds.width as f32;
-            c.rect(x, 64., w, bounds.height as f32, 13., render::TASK_FILL);
-            c.outline(x, 64., w, bounds.height as f32, 13., 0x31523e);
-            c.glass_edge(x, 64., w, bounds.height as f32, 13., 0.);
-            c.text("Progres", x + 12., 76., w - 24., 10.5, false, 0xa0b4a8);
+            c.glass_panel(
+                (x, 64., w, bounds.height as f32),
+                13.,
+                render::TASK_PROGRESS_FILL,
+                0.6,
+            );
+            c.text(
+                i18n::tr("Progres"),
+                x + 12.,
+                76.,
+                w - 24.,
+                10.5,
+                false,
+                0x25492c,
+            );
             let numerator = done.to_string();
             let denominator = format!("/{}", total);
             let measured = c.measure_text(&numerator, 40., true)
@@ -397,7 +375,7 @@ impl Window {
                 w - 24.,
                 size,
                 true,
-                0xf2faf5,
+                0x102b18,
             );
             let num_w = c.measure_text(&numerator, size, true);
             c.text(
@@ -407,7 +385,7 @@ impl Window {
                 w - 26. - num_w,
                 26. * scale,
                 false,
-                0x93aa9c,
+                0x25492c,
             );
             let segments = total.clamp(1, 6);
             let segment_w = (w - 24. - (segments - 1) as f32 * 4.) / segments as f32;
@@ -419,18 +397,18 @@ impl Window {
             let portion = c.animate_value((x, 186., w, 4.), 4, portion, 0.3);
             for i in 0..segments {
                 let xx = x + 12. + i as f32 * (segment_w + 4.);
-                c.rect(xx, 186., segment_w, 4., 2., 0x35443d);
+                c.rect(xx, 186., segment_w, 4., 2., 0x5bb570);
                 let fill = (portion * segments as f32 - i as f32).clamp(0., 1.);
                 if fill > 0. {
-                    c.rect(xx, 186., segment_w * fill, 4., 2., render::TASK_ACCENT);
+                    c.rect(xx, 186., segment_w * fill, 4., 2., 0x135227);
                 }
             }
             let caption = if total == 0 {
-                "Belum ada".into()
+                i18n::tr("Belum ada").into()
             } else if done == total {
-                "Semua selesai".into()
+                i18n::tr("Semua selesai").into()
             } else {
-                format!("{} tersisa", total - done)
+                i18n::format!("{} tersisa", "{} remaining", total - done)
             };
             c.text(
                 &caption,
@@ -439,7 +417,7 @@ impl Window {
                 w - 24.,
                 if w < 100. { 9. } else { 10.5 },
                 false,
-                0xa0b4a8,
+                0x25492c,
             );
         }
     }
@@ -467,7 +445,7 @@ impl Window {
             }
             c.text(
                 if track.title.is_empty() {
-                    "Siap diputar"
+                    i18n::tr("Siap diputar")
                 } else {
                     &track.title
                 },
@@ -480,7 +458,7 @@ impl Window {
             );
             c.text(
                 if track.artist.is_empty() {
-                    "Media Windows"
+                    i18n::tr("Media Windows")
                 } else {
                     &track.artist
                 },
@@ -499,13 +477,7 @@ impl Window {
             let caption = lyric
                 .and_then(|i| track.lyrics.get(i))
                 .map(|l| l.text.as_str())
-                .unwrap_or(if !track.lyrics_loaded && track.lyrics_retry.is_some() {
-                    "Menunggu layanan lirik"
-                } else if track.lyrics_loaded {
-                    "Lirik tidak tersedia"
-                } else {
-                    ""
-                });
+                .unwrap_or_else(|| track.lyrics_message());
             c.text(caption, x, 88., cw, 15., true, INK);
             if let Some(next) = lyric.and_then(|i| track.lyrics.get(i + 1)) {
                 c.text(&next.text, x, 115., cw, 11., false, 0x87939f);
@@ -583,14 +555,14 @@ impl Window {
 
 fn task_priority(priority: u8) -> (&'static str, u32) {
     match priority {
-        1 => ("Penting", 0xff8198),
-        2 => ("Ringan", 0x74dfb1),
-        _ => ("Sedang", 0xf1bf61),
+        1 => (i18n::tr("Penting"), 0xff8198),
+        2 => (i18n::tr("Ringan"), 0x74dfb1),
+        _ => (i18n::tr("Sedang"), 0xf1bf61),
     }
 }
 
 pub(super) unsafe fn priority_label_size(c: &Canvas, width: i32) -> f32 {
-    let measured = ["Penting", "Sedang", "Ringan"]
+    let measured = [i18n::tr("Penting"), i18n::tr("Sedang"), i18n::tr("Ringan")]
         .iter()
         .map(|text| unsafe { c.measure_text(text, 9.5, false) })
         .fold(0_f32, f32::max);

@@ -3,10 +3,90 @@
 use crate::*;
 use windows::Win32::UI::Controls::{EM_SETCUEBANNER, EM_SETLIMITTEXT, EM_SETMARGINS};
 
+pub(super) struct BufferedPainting;
+impl BufferedPainting {
+    pub fn new() -> Result<Self> {
+        unsafe {
+            windows::Win32::UI::Controls::BufferedPaintInit()?;
+        }
+        Ok(Self)
+    }
+}
+impl Drop for BufferedPainting {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = windows::Win32::UI::Controls::BufferedPaintUnInit();
+        }
+    }
+}
+
+/// GDI's dark EDIT background has zero alpha on an extended DWM frame.
+/// Retain the native text/selection/IME renderer, then make its buffer opaque.
+pub(super) unsafe fn paint_opaque(edit: HWND, original: WNDPROC) -> bool {
+    use windows::Win32::UI::Controls::*;
+    unsafe {
+        if !GetUpdateRect(edit, None, false).as_bool() {
+            return false;
+        }
+        let mut client = RECT::default();
+        if GetClientRect(edit, &mut client).is_err() {
+            return false;
+        }
+        let mut paint = PAINTSTRUCT::default();
+        let dc = BeginPaint(edit, &mut paint);
+        let mut buffered_dc = HDC::default();
+        let buffer = BeginBufferedPaint(dc, &client, BPBF_TOPDOWNDIB, None, &mut buffered_dc);
+        let target = if buffer != 0 { buffered_dc } else { dc };
+        CallWindowProcW(
+            original,
+            edit,
+            WM_PRINTCLIENT,
+            WPARAM(target.0 as usize),
+            LPARAM((PRF_CLIENT | PRF_ERASEBKGND) as isize),
+        );
+        if buffer != 0 {
+            let _ = BufferedPaintSetAlpha(buffer, None, 255);
+            let _ = EndBufferedPaint(buffer, true);
+        }
+        let _ = EndPaint(edit, &paint);
+        true
+    }
+}
+
+/// Some EDIT operations draw directly before invalidating. Repaint through the
+/// opaque buffer before returning to composition, including drag selection.
+pub(super) unsafe fn refresh_opaque(edit: HWND, message: u32) {
+    use windows::Win32::UI::Controls::{EM_REPLACESEL, EM_SETSEL};
+    if matches!(
+        message,
+        WM_CHAR
+            | WM_KEYDOWN
+            | WM_KEYUP
+            | WM_LBUTTONDOWN
+            | WM_LBUTTONUP
+            | WM_MOUSEMOVE
+            | WM_SETFOCUS
+            | WM_KILLFOCUS
+            | WM_SETTEXT
+            | WM_CUT
+            | WM_CLEAR
+            | WM_PASTE
+            | WM_UNDO
+            | WM_HSCROLL
+            | EM_SETSEL
+            | EM_REPLACESEL
+    ) {
+        unsafe {
+            let _ = InvalidateRect(Some(edit), None, false);
+            let _ = UpdateWindow(edit);
+        }
+    }
+}
+
 pub(super) const FIELD: u32 = 0x12151a;
 pub(super) const FIELD_COLORREF: COLORREF = COLORREF(0x001a1512);
-pub(super) const TASK_FIELD: u32 = 0x141d17;
-pub(super) const TASK_FIELD_COLORREF: COLORREF = COLORREF(0x00171d14);
+pub(super) const TASK_FIELD: u32 = 0x181b20;
+pub(super) const TASK_FIELD_COLORREF: COLORREF = COLORREF(0x00201b18);
 pub(super) const TEXT_COLORREF: COLORREF = COLORREF(0x00f6f4f2);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -138,12 +218,21 @@ pub(super) fn in_view(bounds: Bounds, panel_height: i32) -> bool {
     bounds.y >= 22 && bounds.y + bounds.height <= panel_height - 12
 }
 
-pub(super) unsafe fn place(edit: HWND, bounds: Bounds, visible: bool) {
+pub(super) unsafe fn place(edit: HWND, bounds: Bounds, visible: bool, dpi: dpi::Scale) {
     unsafe {
         // Move before showing so a new control never flashes at its old position.
         if visible {
             let b = bounds.edit();
-            let _ = MoveWindow(edit, b.x, b.y, b.width, b.height, true);
+            let x = dpi.px(b.x);
+            let y = dpi.px(b.y);
+            let _ = MoveWindow(
+                edit,
+                x,
+                y,
+                dpi.px(b.x + b.width) - x,
+                dpi.px(b.y + b.height) - y,
+                true,
+            );
             let _ = ShowWindow(edit, SW_SHOW);
             let _ = InvalidateRect(Some(edit), None, true);
         } else {
@@ -159,8 +248,23 @@ fn fields(w: &Window) -> [Option<(HWND, Bounds)>; 4] {
         return fields;
     }
     let settings = &w.shared.borrow().data.settings;
+    if w.page == 0
+        && w.spotify_search_input_ready(settings.motion)
+        && !w.spotify_search.edit.is_invalid()
+        && w.overlay.as_ref().is_none_or(|overlay| !overlay.shell)
+    {
+        fields[0] = Some((
+            w.spotify_search.edit,
+            spotify_ui::edit_bounds(settings.width, w.spotify_search.mode),
+        ));
+        return fields;
+    }
     if w.page == 4 {
         fields[0] = Some((w.input, task_bounds(settings.width)));
+        return fields;
+    }
+    if w.page == assistant::PAGE && !w.ai_input.is_invalid() {
+        fields[0] = Some((w.ai_input, assistant_ui::prompt_bounds(settings.width)));
         return fields;
     }
     if w.page != 2 || !w.calendar.form {
@@ -174,7 +278,7 @@ fn fields(w: &Window) -> [Option<(HWND, Bounds)>; 4] {
 }
 
 pub(super) unsafe fn draw_fields(c: &Canvas, w: &Window) {
-    if !w.settings && w.page == 4 {
+    if !w.settings && matches!(w.page, 0 | 4) {
         return;
     }
     unsafe {

@@ -22,6 +22,8 @@ pub(super) unsafe fn prepare_first_frame(hwnd: HWND, w: &mut Window) -> Result<(
             hwnd,
             bounds.right as u32,
             bounds.bottom as u32,
+            w.alpha_shell,
+            w.dpi,
         )?);
         w.paint()?;
         if !w.canvas.as_ref().is_some_and(Canvas::has_frame) {
@@ -31,6 +33,9 @@ pub(super) unsafe fn prepare_first_frame(hwnd: HWND, w: &mut Window) -> Result<(
             region(hwnd, w);
         }
         trace("create: first frame ready before show");
+        w.first_frame_ms = APP_STARTED
+            .get()
+            .map_or(0., |start| start.elapsed().as_secs_f64() * 1000.);
         Ok(())
     }
 }
@@ -46,6 +51,7 @@ pub(super) unsafe fn begin_transition(w: &mut Window, shell: bool, duration: f32
                 started: Instant::now(),
                 duration,
                 shell,
+                direction: 0.,
             });
     } else {
         w.overlay = None;
@@ -53,9 +59,10 @@ pub(super) unsafe fn begin_transition(w: &mut Window, shell: bool, duration: f32
 }
 pub(super) unsafe fn animate(_hwnd: HWND, w: &mut Window) {
     unsafe {
-        begin_transition(w, true, 0.28);
+        begin_transition(w, true, motion::SHELL);
     }
     if !w.expanded {
+        w.shelf_preview_open = false;
         w.preview_worker = None;
         if let Some(canvas) = &w.canvas {
             canvas.release_preview();
@@ -72,9 +79,49 @@ pub(super) unsafe fn animate(_hwnd: HWND, w: &mut Window) {
         w.peek_velocity = 0.;
     }
 }
+pub(super) unsafe fn sample_companion_cursor(hwnd: HWND, w: &mut Window) {
+    w.companion_pointer = None;
+    if w.offscreen
+        || !w.shared.borrow().data.settings.motion
+        || !w.companion_visible()
+        || !IsWindowVisible(hwnd).as_bool()
+        || w.settings && IsIconic(hwnd).as_bool()
+    {
+        return;
+    }
+    let mut screen = POINT::default();
+    if GetCursorPos(&mut screen).is_err() {
+        return;
+    }
+    let mut client = screen;
+    if !ScreenToClient(hwnd, &mut client).as_bool() {
+        return;
+    }
+    w.companion_pointer = Some(w.dpi.point(client.x, client.y));
+    w.companion
+        .observe_cursor((screen.x, screen.y), Instant::now());
+}
+
 pub(super) fn frame_interval(w: &Window) -> Option<Duration> {
     let state = w.shared.borrow();
     let now = Instant::now();
+    if w.settings {
+        let companion_visible = !w.offscreen
+            && w.companion_visible()
+            && unsafe {
+                IsWindowVisible(state.settings_window).as_bool()
+                    && !IsIconic(state.settings_window).as_bool()
+            };
+        return (state.data.settings.motion
+            && (w.overlay.is_some()
+                || w.canvas.as_ref().is_some_and(Canvas::glass_animating)
+                || companion_visible && w.companion.reacting()))
+        .then_some(motion::FRAME)
+        .or_else(|| {
+            (state.data.settings.motion && companion_visible)
+                .then(|| w.companion.ambient_interval(now))
+        });
+    }
     let target = if w.expanded { 1. } else { 0. };
     let target_peek = if w.expanded || w.mode == shell_policy::Mode::Peek {
         1.
@@ -89,6 +136,14 @@ pub(super) fn frame_interval(w: &Window) -> Option<Duration> {
         || w.idle_transition.is_some()
         || w.canvas.as_ref().is_some_and(Canvas::glass_animating)
         || w.palette.active(now)
+        || w.island_style.active(now)
+        || w.compact_activity_size.active(now)
+        || state.data.settings.motion
+            && w.expanded
+            && w.page == 0
+            && w.spotify_search_reveal.active(now)
+        || w.compact_activity_progress != w.compact_activity_size.sample(now)
+        || w.entrance.is_some()
         || w.expanded && w.page == 2 && w.calendar.active()
         || (w.sidebar_scroll - w.sidebar_target_scroll).abs() > 0.1
         || w.hover_tick.is_some()
@@ -97,28 +152,94 @@ pub(super) fn frame_interval(w: &Window) -> Option<Duration> {
                 .is_some_and(|(_, start)| start.elapsed().as_millis() < 350)
         || state.data.settings.motion && w.expanded && w.page == 3
         || state.data.settings.motion && w.expanded && w.page == 1 && state.running.is_some()
+        || state.data.settings.motion
+            && !w.offscreen
+            && w.companion_visible()
+            && w.companion.reacting()
     {
         return Some(motion::FRAME);
     }
-    let playing = state
-        .media
-        .as_ref()
-        .is_some_and(|m| m.snapshot.lock().is_ok_and(|s| s.playing));
-    if playing && (w.expanded && w.page == 0 || !w.expanded) {
-        Some(if state.data.settings.motion {
-            motion::FRAME
-        } else {
-            Duration::from_millis(250)
-        })
+    let music_interval = (w.expanded && w.page == 0 || !w.expanded)
+        .then(|| state.media.as_ref()?.snapshot.lock().ok())
+        .flatten()
+        .and_then(|track| {
+            if !track.playing {
+                return (w.expanded && w.page == 0)
+                    .then(|| track.seek_feedback)
+                    .flatten()
+                    .map(|at| Duration::from_millis(2500).saturating_sub(at.elapsed()))
+                    .filter(|remaining| !remaining.is_zero());
+            }
+            if state.data.settings.motion {
+                Some(motion::FRAME)
+            } else {
+                let fallback = Duration::from_millis(250);
+                if state.data.settings.show_lyrics && !track.lyrics.is_empty() {
+                    Some(track.lyric_boundary_wait(fallback))
+                } else {
+                    Some(fallback)
+                }
+            }
+        });
+    if music_interval.is_some() {
+        music_interval
+    } else if state.data.settings.motion && !w.offscreen && w.companion_visible() {
+        Some(w.companion.ambient_interval(now))
     } else {
         None
     }
 }
 pub(super) unsafe fn frame_step(hwnd: HWND, w: &mut Window) {
+    if w.settings {
+        if w.overlay.as_ref().is_some_and(|overlay| {
+            !w.shared.borrow().data.settings.motion
+                || overlay.started.elapsed().as_secs_f32() >= overlay.duration
+        }) {
+            w.overlay = None;
+        }
+        unsafe {
+            let _ = InvalidateRect(Some(hwnd), None, false);
+            let _ = UpdateWindow(hwnd);
+        }
+        return;
+    }
     let now = Instant::now();
     let dt = w.frame_tick.elapsed().as_secs_f32().min(0.05);
     w.frame_tick = now;
     let motion = w.shared.borrow().data.settings.motion;
+    if let Some(start) = w.entrance {
+        if !motion || now.saturating_duration_since(start).as_secs_f32() >= motion::ENTRANCE_SECONDS
+        {
+            w.entrance = None;
+        }
+        unsafe {
+            apply_frame(hwnd, w);
+        }
+    }
+    if w.island_style.active(now) {
+        unsafe {
+            apply_frame(hwnd, w);
+        }
+    }
+    let activity = w.compact_activity_size.sample(now);
+    if activity != w.compact_activity_progress {
+        w.compact_activity_progress = activity;
+        unsafe { region(hwnd, w) };
+    }
+    if motion && w.expanded && w.page == 0 {
+        let state = w.shared.borrow();
+        if state.data.settings.album_colors
+            && state.data.settings.show_lyrics
+            && state.media.as_ref().is_some_and(|media| {
+                media
+                    .snapshot
+                    .lock()
+                    .is_ok_and(|track| track.playing && track.palette.is_some())
+            })
+        {
+            w.lyric_glow_phase += f64::from(dt);
+        }
+    }
     if w.feedback
         .is_some_and(|(_, start)| !motion || start.elapsed().as_millis() >= 350)
     {
@@ -175,7 +296,15 @@ pub(super) unsafe fn frame_step(hwnd: HWND, w: &mut Window) {
 
     if needs_region {
         unsafe {
-            region(hwnd, w);
+            if w.island_style.sample(now) > 0.
+                || w.canvas
+                    .as_ref()
+                    .is_some_and(|canvas| canvas.height() != shell_buffer_height(w) as u32)
+            {
+                apply_frame(hwnd, w);
+            } else {
+                region(hwnd, w);
+            }
         }
     }
     if let Some(hover_tick) = w.hover_tick
@@ -216,6 +345,7 @@ pub(super) unsafe fn frame_step(hwnd: HWND, w: &mut Window) {
 pub(super) unsafe fn sync_inputs(hwnd: HWND, w: &mut Window) {
     unsafe {
         if w.settings {
+            assistant_ui::sync_edit(hwnd, w, 710, false);
             return;
         }
         let s = w.shared.borrow().data.settings.clone();
@@ -230,14 +360,43 @@ pub(super) unsafe fn sync_inputs(hwnd: HWND, w: &mut Window) {
             w.calendar.scroll.round() as i32,
             w.calendar.form_y as i32,
             panel_height(&s),
-            0,
+            (s.language == i18n::Language::English) as i32,
+            if w.page == 0 && w.spotify_search_input_ready(s.motion) {
+                match w.spotify_search.mode {
+                    spotify::SearchMode::Free => 1,
+                    spotify::SearchMode::Setup => 2,
+                    spotify::SearchMode::Connected => 3,
+                }
+            } else {
+                0
+            },
         ];
         if w.input_layout == Some(key) {
             return;
         }
         w.input_layout = Some(key);
+        assistant_ui::sync_edit(hwnd, w, s.width, show);
+        spotify_ui::sync_edit(hwnd, w, s.width, show);
         if !w.input.is_invalid() {
-            input::place(w.input, input::task_bounds(s.width), show && w.page == 4);
+            input::configure(w.input, w.input_font, i18n::tr("Tambah tugas"), 500);
+        }
+        for (i, edit) in w.event_inputs.into_iter().enumerate() {
+            if !edit.is_invalid() {
+                input::configure(
+                    edit,
+                    w.input_font,
+                    i18n::tr(["Nama acara", "09:00", "5", "https://… (opsional)"][i]),
+                    if i == 3 { 2048 } else { 200 },
+                );
+            }
+        }
+        if !w.input.is_invalid() {
+            input::place(
+                w.input,
+                input::task_bounds(s.width),
+                show && w.page == 4,
+                w.dpi,
+            );
         }
         for (i, edit) in w.event_inputs.into_iter().enumerate() {
             if edit.is_invalid() {
@@ -246,7 +405,7 @@ pub(super) unsafe fn sync_inputs(hwnd: HWND, w: &mut Window) {
             let bounds = input::figma_event_bounds(s.width, i);
             let visible =
                 show && w.page == 2 && w.calendar.form && input::in_view(bounds, host_height());
-            input::place(edit, bounds, visible);
+            input::place(edit, bounds, visible, w.dpi);
         }
         let _ = hwnd;
     }
@@ -254,7 +413,7 @@ pub(super) unsafe fn sync_inputs(hwnd: HWND, w: &mut Window) {
 pub(super) unsafe fn create_event_inputs(hwnd: HWND, w: &mut Window) -> Result<()> {
     unsafe {
         let instance = GetModuleHandleW(None)?;
-        input::configure(w.input, w.input_font, "Tambah tugas", 500);
+        input::configure(w.input, w.input_font, i18n::tr("Tambah tugas"), 500);
         for (i, text) in ["", "09:00", "5", ""].into_iter().enumerate() {
             let edit = CreateWindowExW(
                 WINDOW_EX_STYLE(0),
@@ -273,7 +432,7 @@ pub(super) unsafe fn create_event_inputs(hwnd: HWND, w: &mut Window) -> Result<(
             input::configure(
                 edit,
                 w.input_font,
-                ["Nama acara", "09:00", "5", "https://… (opsional)"][i],
+                i18n::tr(["Nama acara", "09:00", "5", "https://… (opsional)"][i]),
                 if i == 3 { 2048 } else { 200 },
             );
             SetWindowLongPtrW(edit, GWLP_WNDPROC, edit_proc as *const () as isize);
@@ -301,7 +460,9 @@ impl PrivateFont {
         if unsafe { AddFontResourceExW(&path, FR_PRIVATE, None) } == 0 {
             return Err(Error::new(
                 E_FAIL,
-                "Font Plus Jakarta Sans belum tersedia. Simpan folder fonts di samping Horizon.exe.",
+                i18n::tr(
+                    "Font Plus Jakarta Sans belum tersedia. Simpan folder fonts di samping Horizon.exe.",
+                ),
             ));
         }
         Ok(Self(path))

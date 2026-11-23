@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 120">
+  <!-- Authored sleeping key pose. Segment order matches the lounge master
+       for continuous silhouette interpolation, not a rotated seated body. -->
+  <path id="torso" d="M127 86 C138 78 158 82 165 96 C174 106 168 116 153 117 C145 119 137 116 132 112 C126 110 123 107 122 104 C117 97 119 90 127 86 Z"/>
+  <path id="support" d="M133 96 C125 97 120 103 112 108 C104 107 95 108 92 113 C90 117 98 119 110 118 C115 119 120 118 122 115 C126 114 130 107 131 103 C133 101 134 98 133 96 Z"/>
+  <path id="back-leg" d="M155 98 C165 88 179 89 183 99 L184 108 C184 114 177 115 172 111 L160 110 L154 107 Z"/>
+  <path id="back-foot" d="M173 101 C179 96 190 100 192 107 C195 115 188 120 179 118 L175 115 C173 113 170 109 173 101 Z"/>
+  <path id="front-leg" d="M147 105 C151 95 165 99 169 108 L173 114 L169 120 L157 119 L149 116 L145 110 Z"/>
+  <path id="front-foot" d="M160 110 C169 104 181 109 182 115 C184 120 175 120 167 120 L162 119 C158 118 154 116 160 110 Z"/>
+  <path id="badge" d="M140 90 C135 93 136 99 141 100 C147 102 152 98 152 94 C146 100 139 97 140 90 Z"/>
+</svg>

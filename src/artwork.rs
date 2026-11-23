@@ -1,5 +1,5 @@
 use windows::{
-    Win32::{Graphics::Imaging::*, System::Com::*},
+    Win32::{Graphics::Imaging::*, System::Com::*, UI::WindowsAndMessaging::HICON},
     core::*,
 };
 pub unsafe fn source(bytes: &[u8], size: u32) -> Result<IWICBitmapSource> {
@@ -62,11 +62,30 @@ pub unsafe fn preview(bytes: &[u8]) -> Result<PreviewImage> {
             WICDecodeMetadataCacheOnLoad,
         )?;
         let frame = decoder.GetFrame(0)?;
+        preview_pixels(&factory, &frame, 320)
+    }
+}
+
+pub unsafe fn icon_preview(icon: HICON) -> Result<PreviewImage> {
+    unsafe {
+        let factory: IWICImagingFactory =
+            CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
+        let bitmap = factory.CreateBitmapFromHICON(icon)?;
+        preview_pixels(&factory, &bitmap, 64)
+    }
+}
+
+unsafe fn preview_pixels(
+    factory: &IWICImagingFactory,
+    source: &IWICBitmapSource,
+    limit: u32,
+) -> Result<PreviewImage> {
+    unsafe {
         let (mut width, mut height) = (0, 0);
-        frame.GetSize(&mut width, &mut height)?;
-        let (width, height) = fit_size(width, height, 640, 320);
+        source.GetSize(&mut width, &mut height)?;
+        let (width, height) = fit_size(width, height, limit, limit);
         let scaler = factory.CreateBitmapScaler()?;
-        scaler.Initialize(&frame, width, height, WICBitmapInterpolationModeFant)?;
+        scaler.Initialize(source, width, height, WICBitmapInterpolationModeFant)?;
         let converter = factory.CreateFormatConverter()?;
         converter.Initialize(
             &scaler,
@@ -122,8 +141,16 @@ pub fn palette(bytes: &[u8]) -> Option<[u32; 3]> {
         let image = source(bytes, 32).ok()?;
         let mut pixels = [0u8; 4096];
         image.CopyPixels(std::ptr::null(), 128, &mut pixels).ok()?;
-        Some(from_pixels(&pixels))
+        visible_palette(&pixels)
     }
+}
+fn visible_palette(pixels: &[u8]) -> Option<[u32; 3]> {
+    pixels
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .any(|p| p[3] >= 64)
+        .then(|| from_pixels(pixels))
 }
 pub fn from_pixels(pixels: &[u8]) -> [u32; 3] {
     let mut buckets = [[0u32; 4]; 64];
@@ -205,6 +232,11 @@ pub fn from_pixels(pixels: &[u8]) -> [u32; 3] {
 mod tests {
     use super::*;
     #[test]
+    fn transparent_placeholders_are_not_accepted_as_cover_images() {
+        assert!(visible_palette(&[0, 0, 0, 0].repeat(1024)).is_none());
+        assert!(visible_palette(&[0, 0, 0, 255].repeat(1024)).is_some());
+    }
+    #[test]
     fn preview_fit_preserves_portrait_landscape_and_small_images() {
         assert_eq!(fit_size(1200, 800, 640, 320), (480, 320));
         assert_eq!(fit_size(800, 1200, 640, 320), (213, 320));
@@ -216,7 +248,7 @@ mod tests {
         unsafe {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
             let image = preview(include_bytes!("../assets/fixtures/cover.png")).unwrap();
-            assert!(image.width <= 640 && image.height <= 320);
+            assert!(image.width <= 320 && image.height <= 320);
             assert_eq!(
                 image.pixels.len(),
                 image.width as usize * image.height as usize * 4
